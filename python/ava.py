@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+import copy
 
 ava_common = importlib.import_module("ava-common")
 ava_tests = importlib.import_module("ava-tests")
@@ -164,9 +165,22 @@ def get_options(argv):
     return options
 
 
+def replace_serial(options, serial):
+    options_ = copy.deepcopy(options)
+    options_.android_serial = serial
+    return options_
+
+
 def main(argv):
     # parse options
     options = get_options(argv)
+
+    if options.test_list:
+        # list all existing tests
+        print("list of available tests")
+        for name in ava_tests.AVA_TESTS:
+            print(f"* {name}")
+        return
     # get outfile
     if options.outfile is None or options.outfile == "-":
         options.outfile = "/dev/fd/1"
@@ -174,36 +188,38 @@ def main(argv):
     if options.debug > 0:
         print(f"debug: {options}")
     # create configuration
-    ava_config = AvaConfig(options)
+    devices = ava_common.get_all_serials(options.android_serial)
+    if len(devices) == 0:
+        print("No connected devices")
 
-    if options.test_list:
-        # list all existing tests
-        print("list of available tests")
-        for name in ava_tests.AVA_TESTS:
-            print(f"* {name}")
+    ava_configs = [AvaConfig(replace_serial(options, serial)) for serial in devices]
 
-    elif options.test is not None:
+    if options.test is not None:
         # ensure the test exists
         assert (
-            options.test in ava_tests.AVA_TESTS
-        ), f"error: unknown test {options.test}"
+            options.test in ava_tests.AVA_TESTS, 
+            f"error: unknown test {options.test}"
+        )
         # run a specific test
-        results_dict = ava_tests.AVA_TESTS[options.test](ava_config)
-        if results_dict["retcode"] == -1:
-            print(results_dict["backtrace"])
-            if results_dict["results"] is not None:
-                all_results = results_dict["results"]
-                for result in all_results:
-                    if result["retcode"] != 0:
-                        print(result)
-            else:
-                print(results_dict)
+        for ava_config in ava_configs:
+            print("Run test:", ava_tests.AVA_TESTS[options.test])
+            results_dict = ava_tests.AVA_TESTS[options.test](ava_config)
+            if results_dict["retcode"] == -1:
+                backtrace = results_dict.get("backtrace", "No backtrace")
+                print(f"{backtrace=}")
+                if results_dict.get("results", None) is not None:
+                    all_results = results_dict["results"]
+                    for result in all_results:
+                        if result["retcode"] != 0:
+                            print(result)
+                else:
+                    print(results_dict)
 
-            sys.exit(-1)
-        # write results in outfile
-        results_json = json.dumps(results_dict, indent=4)
-        with open(options.outfile, "w") as fd:
-            fd.write(results_json)
+                sys.exit(-1)
+            # write results in outfile
+            results_json = json.dumps(results_dict, indent=4)
+            with open(options.outfile, "w") as fd:
+                fd.write(results_json)
 
 
 if __name__ == "__main__":

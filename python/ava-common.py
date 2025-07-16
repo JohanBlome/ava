@@ -32,6 +32,30 @@ def get_android_serial(android_serial):
         return None
 
 
+def get_all_serials(specific_serial=None):
+    status, std, stderr, _ = run("adb devices")
+    strch = "[] \n"
+    devices = []
+
+    text = std.decode()
+    specific_serials = None
+    if specific_serial != None:
+        if "," in specific_serial:
+            specific_serials = specific_serial.split("'")
+        else:
+            specific_serials = [specific_serial]
+
+    for line in text.split("\n"):
+        if "List of devices attached" in line:
+            continue
+        if "device" in line:
+            serial = line.split("\t")[0]
+            if specific_serial != None and not (serial in specific_serials):
+                continue
+            devices.append(serial)
+    return devices
+
+
 def run(command, **kwargs):
     debug = kwargs.get("debug", 0)
     dry_run = kwargs.get("dry_run", False)
