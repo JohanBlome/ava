@@ -52,9 +52,9 @@ def list_codecs(ava_config):
 
         # 1. run encapp command
         model = "model"
-        device_workdir = "/sdcard"
-        outfile = encapp.list_codecs(
-            ava_config.android_serial, model, device_workdir, debug=ava_config.debug
+        # use default workdir
+        device_workdir = encapp.get_workdir(ava_config.android_serial)
+        outfile = encapp.list_codecs(ava_config.android_serial, model, device_workdir=device_workdir, debug=ava_config.debug,
         )
         # 2. read and clean up the output file (json)
         codec_list_dict = encapp.read_json_file(outfile, ava_config.debug)
@@ -66,7 +66,6 @@ def list_codecs(ava_config):
     except Exception as e:
         output_dict["retcode"] = -1
         output_dict["error"] = repr(e)
-
     return output_dict
 
 
@@ -163,8 +162,9 @@ def qp_bounds(ava_config):
 
         # 1. run encapp command
         model = "model"
-        # device_workdir = "/data/data/com.facebook.encapp"
-        device_workdir = "/sdcard"
+        device_workdir = encapp.get_workdir(ava_config.android_serial)
+        assert len(device_workdir) > 0, "Error: failed to get device workdir"
+
         local_workdir = "/tmp"
         mediastore = local_workdir
         # configfile = os.path.join(root_path, "tests", "qp_bounds.20-25.pbtxt")
@@ -238,7 +238,7 @@ def qp_bounds(ava_config):
             ava_config.android_serial,
             mediastore,
             local_workdir,
-            device_workdir=None,
+            device_workdir=device_workdir,
             ignore_results=False,
             fast_copy=False,
             split=False,
