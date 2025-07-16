@@ -74,11 +74,11 @@ def run(command, **kwargs):
     if gnu_time:
         # make sure the stats are there
         GNU_TIME_BYTES = b"\n\tUser time"
-        assert GNU_TIME_BYTES in err, "error: cannot find GNU time info in stderr"
-        gnu_time_str = err[err.index(GNU_TIME_BYTES) :].decode("ascii")
-        gnu_time_stats = gnu_time_parse(gnu_time_str, logfd, debug)
-        err = err[0 : err.index(GNU_TIME_BYTES) :]
-        return returncode, out, err, gnu_time_stats
+        if GNU_TIME_BYTES in err:
+            gnu_time_str = err[err.index(GNU_TIME_BYTES) :].decode("ascii")
+            gnu_time_stats = gnu_time_parse(gnu_time_str, logfd, debug)
+            err = err[0 : err.index(GNU_TIME_BYTES) :]
+            return returncode, out, err, gnu_time_stats
     # return results
     return returncode, out, err, None
 

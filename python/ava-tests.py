@@ -24,7 +24,12 @@ import encapp_tool
 
 ENCODED_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi")
 # TODO: figure out how to handle this. On osx the /usr/bin/time is not the GNU version.
+
 GNU_TIME = True
+cmd = "/usr/bin/time -v"
+returncode, out, err, stats = ava_common.run(cmd, logfd=None, gnu_time=GNU_TIME)
+if returncode != 0:
+    GNU_TIME = False
 
 
 def encapp_is_installed(android_serial, debug):
