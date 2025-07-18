@@ -196,8 +196,7 @@ def main(argv):
 
     if options.test is not None:
         # ensure the test exists
-        assert (
-            options.test in ava_tests.AVA_TESTS, 
+        assert options.test in ava_tests.AVA_TESTS, (
             f"error: unknown test {options.test}"
         )
         # run a specific test
