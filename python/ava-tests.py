@@ -54,7 +54,11 @@ def list_codecs(ava_config):
         model = "model"
         # use default workdir
         device_workdir = encapp.get_workdir(ava_config.android_serial)
-        outfile = encapp.list_codecs(ava_config.android_serial, model, device_workdir=device_workdir, debug=ava_config.debug,
+        outfile = encapp.list_codecs(
+            ava_config.android_serial,
+            model,
+            device_workdir=device_workdir,
+            debug=ava_config.debug,
         )
         # 2. read and clean up the output file (json)
         codec_list_dict = encapp.read_json_file(outfile, ava_config.debug)
@@ -82,9 +86,9 @@ def parse_encapp_output(out):
             dst = items[items.index("pull") + 2]
             filename = os.path.join(dst, os.path.basename(src))
             candidate_files.append(filename)
-    assert (
-        len(candidate_files) == 2
-    ), f"error: need 2 candidate lines, found {len(candidate_files)}: {out}"
+    assert len(candidate_files) == 2, (
+        f"error: need 2 candidate lines, found {len(candidate_files)}: {out}"
+    )
     # 2. get the output files
     encapp_output = {}
     for file in candidate_files:
@@ -155,9 +159,9 @@ def qp_bounds(ava_config):
             canonical_names = ava_common.encapp_get_encoder_name(
                 output_dict_list, mime_type
             )
-            assert (
-                len(canonical_names) == 1
-            ), f"error: found {mime_type} encoders: {canonical_names}"
+            assert len(canonical_names) == 1, (
+                f"error: found {mime_type} encoders: {canonical_names}"
+            )
             encoder_name = canonical_names[0]
 
         # 1. run encapp command
@@ -193,10 +197,14 @@ def qp_bounds(ava_config):
                 test.common.id = f"qp_{qpmin}-{qpmax}_{bitrate}"
                 test.common.description = f"Check that boundaries for qp values are within {qpmin} and {qpmax}"
                 # OK. The name resolution will not happen at this late stage.
-                test.common.output_filename = f"qp.bound.{videoname}.qp{qpmin}-{qpmax}.{bitrate}bps"
+                test.common.output_filename = (
+                    f"qp.bound.{videoname}.qp{qpmin}-{qpmax}.{bitrate}bps"
+                )
                 test.input.pix_fmt = encapp.tests_definitions.PixFmt.nv12
                 test.configure.bitrate = bitrate
-                test.configure.bitrate_mode = encapp.tests_definitions.Configure.BitrateMode.vbr
+                test.configure.bitrate_mode = (
+                    encapp.tests_definitions.Configure.BitrateMode.vbr
+                )
                 test.configure.codec = ava_config.encoder
 
                 test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
