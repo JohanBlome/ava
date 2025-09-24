@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -68,6 +69,7 @@ class TestConfig:
     video_duration: float = 10.0
     use_yuv_encoding: bool = False
     enable_device_decode: bool = True
+    mediastore: str = "_mediastore"
     
     def __post_init__(self):
         if self.android_serials is None:
@@ -240,15 +242,17 @@ class DeviceManager:
                     
                     # Create device info for each encoder
                     for encoder_info in filtered_encoders:
+                        # Use canonical_name if available, fallback to name
+                        encoder_name = encoder_info.get("canonical_name", encoder_info.get("name", ""))
                         device = {
                             "serial": serial,
                             "device_workdir": device_workdir,
-                            "encoder": encoder_info["name"],
+                            "encoder": encoder_name,
                             "encoder_info": encoder_info,
                             "codecs": codecs
                         }
                         devices.append(device)
-                        self.logger.info(f"Added device {serial} with encoder {encoder_info['name']}")
+                        self.logger.info(f"Added device {serial} with encoder {encoder_name}")
                         
                 except Exception as e:
                     self.logger.warning(f"Could not setup device {serial}: {e}")
@@ -367,6 +371,8 @@ class DeviceManager:
     def _filter_encoders(self, encoders: List[Dict]) -> List[Dict]:
         """Filter encoders based on criteria: hw accelerated, unique canonical name, video"""
         filtered = []
+        canonical_names_seen = set()  # Track canonical names to avoid duplicates
+        
         for encoder in encoders:
             # Check if it's an encoder (not decoder)
             if not encoder.get("is_encoder", False):
@@ -376,10 +382,18 @@ class DeviceManager:
             if not encoder.get("is_hardware_accelerated", False):
                 continue
                 
-            # Check if it has a unique canonical name
-            name = encoder.get("name", "")
-            if not name or not name.strip():
+            # Check if it has a canonical name
+            canonical_name = encoder.get("canonical_name", "")
+            if not canonical_name or not canonical_name.strip():
+                # Fallback to name if canonical_name is not available
+                canonical_name = encoder.get("name", "")
+                if not canonical_name or not canonical_name.strip():
+                    continue
+                    
+            # Skip if we've already seen this canonical name
+            if canonical_name in canonical_names_seen:
                 continue
+            canonical_names_seen.add(canonical_name)
                 
             # Check if it's a video encoder
             mime_type = encoder.get("mime_type", "")
@@ -430,7 +444,7 @@ class TestRunner:
                 print(f"  - {func.__name__}")
                 
     def run_test(self, test_func: callable, device: Dict[str, Any], 
-                 input_file: str, workdir: str) -> TestResult:
+                 input_file: str, workdir: str, mediastore: str = "_mediastore") -> TestResult:
         """Run a single test"""
         start_time = time.time()
         test_name = test_func.__name__
@@ -441,7 +455,7 @@ class TestRunner:
             
             # Create test-specific workdir within the main workdir
             if workdir is None:
-                workdir = "/tmp/ava_tests"
+                workdir = os.path.join(tempfile.gettempdir(), "ava_tests")
             
             # Create subdirectory for this test run
             test_workdir = os.path.join(workdir, f"{device_serial}_{test_name}")
@@ -461,6 +475,7 @@ class TestRunner:
             test_data["video_duration"] = self.config.video_duration
             test_data["use_yuv_encoding"] = self.config.use_yuv_encoding
             test_data["enable_device_decode"] = self.config.enable_device_decode
+            test_data["mediastore"] = mediastore
             
             # Run the test function
             if self.config.dry_run:
@@ -509,6 +524,14 @@ class TestRunner:
                     # Update test_data with any additional data from the test
                     if "test_data" in result:
                         test_data.update(result["test_data"])
+                    
+                    # Add quality_csv to test_data if available
+                    if "quality_csv" in result:
+                        test_data["quality_csv"] = result["quality_csv"]
+                    
+                    # Add stats_csv to test_data if available
+                    if "stats_csv" in result:
+                        test_data["stats_csv"] = result["stats_csv"]
                 else:
                     test_success = True
                     output_files = []
@@ -587,21 +610,324 @@ class IntegratedTestRunner:
         self.logger.info("Step 2: Running tests")
         test_results = self._run_tests()
         
-        # Step 3: Quality assessment
-        self.logger.info("Step 3: Assessing quality")
-        quality_results = self._assess_quality(test_results)
-        
-        # Step 4: Generate reports
+        # Step 3: Generate reports
         self.logger.info("Step 4: Generating reports")
-        reports = self._generate_reports(test_results, quality_results)
+        reports = self._generate_reports(test_results, [])
         
         # Print summary
-        self._print_summary(test_results, quality_results, reports)
+        self._print_summary(test_results, reports)
         
-        return test_results, quality_results, reports
+        return test_results, reports
+    
+    def generate_reports_only(self):
+        """Generate reports from existing test data without running new tests"""
+        self.logger.info("Generating reports from existing test data")
+        
+        # Step 1: Load existing test results from workdir
+        test_results = self._load_existing_test_results()
+        if not test_results:
+            self.logger.error("No existing test results found in workdir")
+            return
+        
+        # Step 2: Run quality assessment on existing JSON files
+        self.logger.info("Step 2: Running quality assessment on existing test data")
+        quality_results = self._run_quality_assessment_on_existing(test_results)
+        
+        # Step 3: Generate reports
+        self.logger.info("Step 3: Generating reports")
+        reports = self._generate_reports(test_results, [])
+        
+        # Step 4: Print summary
+        self._print_summary(test_results, reports)
+        
+        return test_results, reports
+    
+    def run_quality_only(self):
+        """Run quality assessment on existing test data without running new tests"""
+        self.logger.info("Running quality assessment on existing test data")
+        
+        # Step 1: Load existing test results from workdir
+        test_results = self._load_existing_test_results()
+        if not test_results:
+            self.logger.error("No existing test results found in workdir")
+            return
+        
+        # Step 2: Run quality assessment on existing data
+        self.logger.info("Running quality assessment on existing test results")
+        test_results = self._run_quality_assessment_on_existing(test_results)
+        
+        # Step 3: Generate reports with quality data
+        self.logger.info("Generating reports with quality data")
+        reports = self._generate_reports(test_results, [])
+        
+        # Step 4: Print summary
+        self._print_summary(test_results, [], reports)
+        
+        return test_results, reports
+    
+    def _run_quality_assessment_on_existing(self, test_results: List[TestResult]) -> List[TestResult]:
+        """Run quality assessment on existing test results and integrate into TestResult objects"""
+        
+        for result in test_results:
+            if result.success and result.output_files:
+                self.logger.info(f"Running quality assessment for {result.test_name} on {result.device_serial}")
+                
+                # Find JSON files in the output
+                json_files = [f for f in result.output_files if f.endswith('.json')]
+                if json_files:
+                    self.logger.info(f"Found {len(json_files)} JSON files for quality assessment")
+                    
+                    try:
+                        # Use ava_common.run_encapp_quality to process all JSON files
+                        from ava import ava_common
+                        output_dir = os.path.dirname(json_files[0])
+                        csv_output = os.path.join(output_dir, "quality_analysis.csv")
+                        
+                        # Run encapp_quality on all JSON files
+                        success = ava_common.run_encapp_quality(
+                            json_files, 
+                            output_dir, 
+                            self.config.mediastore, 
+                            max_parallel=1
+                        )
+                        
+                        if success and os.path.exists(csv_output):
+                            # Parse the quality CSV and integrate into TestResult
+                            quality_data_list = self._parse_quality_csv(csv_output)
+                            if quality_data_list:
+                                # Integrate quality data directly into TestResult
+                                result.quality_metrics = quality_data_list
+                                if result.test_data is None:
+                                    result.test_data = {}
+                                result.test_data["quality_csv"] = csv_output
+                                self.logger.info(f"Successfully integrated {len(quality_data_list)} quality data points into {result.test_name}")
+                            else:
+                                self.logger.warning(f"Failed to parse quality data from {csv_output}")
+                        else:
+                            self.logger.warning(f"Failed to generate quality data for {result.test_name}")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error running quality assessment for {result.test_name}: {e}")
+                else:
+                    self.logger.warning(f"No JSON files found for {result.test_name}")
+        
+        return test_results
+    
+    def _run_encapp_quality_for_file(self, json_file: str, test_name: str) -> Optional[str]:
+        """Run encapp_quality on a specific JSON file"""
+        try:
+            import subprocess
+            import os
+            
+            # Determine output directory
+            output_dir = os.path.dirname(json_file)
+            csv_output = os.path.join(output_dir, "quality_analysis.csv")
+            
+            # Run encapp_quality
+            cmd = [
+                "python3", "-m", "encapp_quality",
+                json_file,
+                "--media", self.config.mediastore,
+                "--output", csv_output,
+                "--keep-quality-files",
+                "--ignore-timing",
+                "--header"
+            ]
+            
+            self.logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd="/Users/johanblome/code/ava")
+            
+            if result.returncode == 0:
+                if os.path.exists(csv_output):
+                    self.logger.info(f"Quality assessment completed: {csv_output}")
+                    return csv_output
+                else:
+                    self.logger.error(f"Quality assessment completed but output file not found: {csv_output}")
+            else:
+                self.logger.error(f"Quality assessment failed: {result.stderr}")
+                
+        except Exception as e:
+            self.logger.error(f"Error running encapp_quality: {e}")
+        
+        return None
+    
+    def _parse_quality_csv(self, csv_file: str) -> Optional[List[Dict[str, Any]]]:
+        """Parse quality CSV file and return list of quality metrics"""
+        try:
+            import pandas as pd
+            
+            df = pd.read_csv(csv_file)
+            if df.empty:
+                return None
+            
+            # Extract quality metrics from each row in the CSV
+            quality_results = []
+            for _, row in df.iterrows():
+                metrics = {
+                    # Basic file info
+                    "media": row.get('media', None),
+                    "description": row.get('description', None),
+                    "id": row.get('id', None),
+                    "testfile": row.get('testfile', None),
+                    "reference_file": row.get('reference_file', None),
+                    
+                    # Device/platform info
+                    "model": row.get('model', None),
+                    "platform": row.get('platform', None),
+                    "serial": row.get('serial', None),
+                    
+                    # Codec and encoding settings
+                    "codec": row.get('codec', None),
+                    "bitrate_mode": row.get('bitrate_mode', None),
+                    "quality": row.get('quality', None),
+                    "gop_sec": row.get('gop_sec', None),
+                    
+                    # Video properties
+                    "framerate_fps": row.get('framerate_fps', None),
+                    "width": row.get('width', None),
+                    "height": row.get('height', None),
+                    "resolution": f"{row.get('width', 0)}x{row.get('height', 0)}" if row.get('width') and row.get('height') else None,
+                    
+                    # Bitrate metrics
+                    "bitrate_bps": row.get('bitrate_bps', None),
+                    "bitrate": row.get('bitrate_bps', None),  # Alias for compatibility
+                    "meanbitrate_bps": row.get('meanbitrate_bps', None),
+                    "mean_bpp": row.get('mean_bpp', None),
+                    "calculated_bitrate_bps": row.get('calculated_bitrate_bps', None),
+                    
+                    # Frame info
+                    "framecount": row.get('framecount', None),
+                    "duration": row.get('framecount', None),  # Using framecount as duration proxy
+                    "iframes": row.get('iframes', None),
+                    "pframes": row.get('pframes', None),
+                    "bframes": row.get('bframes', None),
+                    "iframe_size_bytes": row.get('iframe_size_bytes', None),
+                    "pframe_size_bytes": row.get('pframe_size_bytes', None),
+                    "bframe_size_bytes": row.get('bframe_size_bytes', None),
+                    
+                    # File size
+                    "size_bytes": row.get('size_bytes', None),
+                    "file_size": row.get('size_bytes', None),  # Alias for compatibility
+                    
+                    # VMAF metrics (using correct column names)
+                    "vmaf_mean": row.get('vmaf_mean', None),
+                    "vmaf": row.get('vmaf_mean', None),  # Alias for compatibility
+                    "vmaf_harmonic_mean": row.get('vmaf_harmonic_mean', None),
+                    "vmaf_min": row.get('vmaf_min', None),
+                    "vmaf_max": row.get('vmaf_max', None),
+                    "vmaf_p5": row.get('vmaf_p5', None),
+                    "vmaf_p10": row.get('vmaf_p10', None),
+                    "vmaf_p25": row.get('vmaf_p25', None),
+                    "vmaf_p50": row.get('vmaf_p50', None),
+                    "vmaf_p75": row.get('vmaf_p75', None),
+                    "vmaf_p90": row.get('vmaf_p90', None),
+                    "vmaf_p95": row.get('vmaf_p95', None),
+                    "vmaf_model": row.get('vmaf_model', None),
+                    "vmaf_framecount": row.get('vmaf_framecount', None),
+                    "vmaf_zero_vmaf": row.get('vmaf_zero_vmaf', None),
+                    
+                    # Quality metrics (using correct column names)
+                    "ssim": row.get('ssim', None),
+                    "psnr": row.get('psnr', None),
+                    "psnr_y": row.get('psnr_y', None),
+                    "psnr_u": row.get('psnr_u', None),
+                    "psnr_v": row.get('psnr_v', None),
+                    "cvvdp": row.get('cvvdp', None),
+                    
+                    # QP metrics (using correct column names with _min/_max/_avg)
+                    "qpy_min": row.get('qpy_min', None),
+                    "qpy_max": row.get('qpy_max', None),
+                    "qpy_avg": row.get('qpy_avg', None),
+                    "qpu_min": row.get('qpu_min', None),
+                    "qpu_max": row.get('qpu_max', None),
+                    "qpu_avg": row.get('qpu_avg', None),
+                    "qpv_min": row.get('qpv_min', None),
+                    "qpv_max": row.get('qpv_max', None),
+                    "qpv_avg": row.get('qpv_avg', None),
+                    
+                    # Complexity metrics (using correct column names with _min/_max/_avg)
+                    "si_min": row.get('si_min', None),
+                    "si_max": row.get('si_max', None),
+                    "si_avg": row.get('si_avg', None),
+                    "ti_min": row.get('ti_min', None),
+                    "ti_max": row.get('ti_max', None),
+                    "ti_avg": row.get('ti_avg', None),
+                    
+                    # Source analysis
+                    "source_complexity": row.get('source_complexity', None),
+                    "source_motions": row.get('source_motions', None),
+                    "warning": row.get('warning', None)
+                }
+                # Only add non-null values
+                quality_metrics = {k: v for k, v in metrics.items() if v is not None}
+                if quality_metrics:  # Only add if we have some data
+                    quality_results.append(quality_metrics)
+            
+            return quality_results if quality_results else None
+            
+        except Exception as e:
+            self.logger.error(f"Failed to parse quality CSV {csv_file}: {e}")
+            return None
+    
+    def _load_existing_test_results(self) -> List[TestResult]:
+        """Load existing test results from the workdir"""
+        test_results = []
+        
+        if not os.path.exists(self.config.workdir):
+            self.logger.error(f"Workdir does not exist: {self.config.workdir}")
+            self.logger.error("Make sure you're using the same workdir path that was used during test execution.")
+            self.logger.error("You can find existing test data with: find /tmp -name '*ava*' -type d")
+            return test_results
+        
+        # Look for test result directories
+        for item in os.listdir(self.config.workdir):
+            item_path = os.path.join(self.config.workdir, item)
+            if os.path.isdir(item_path) and '_' in item:
+                # Try to extract device serial and test name from directory name
+                parts = item.split('_')
+                if len(parts) >= 2:
+                    device_serial = parts[0]
+                    test_name = '_'.join(parts[1:])
+                    
+                    # Look for output files and quality CSV
+                    output_files = []
+                    quality_csv = None
+                    
+                    for file in os.listdir(item_path):
+                        file_path = os.path.join(item_path, file)
+                        if file.endswith('.json'):
+                            output_files.append(file_path)
+                        elif file == 'quality_analysis.csv':
+                            quality_csv = file_path
+                    
+                    if output_files:
+                        # Create TestResult from existing data
+                        test_data = {}
+                        if quality_csv:
+                            test_data["quality_csv"] = quality_csv
+                        
+                        test_result = TestResult(
+                            test_name=test_name,
+                            device_serial=device_serial,
+                            success=True,
+                            duration=0,  # Unknown duration for existing results
+                            output_files=output_files,
+                            test_data=test_data,
+                            error_message=None,
+                            quality_metrics={}
+                        )
+                        test_results.append(test_result)
+                        self.logger.info(f"Loaded existing test result: {test_name} on {device_serial}")
+        
+        return test_results
     
     def _prepare_sources(self) -> List[str]:
         """Prepare video sources for testing"""
+        # If input files are explicitly provided, use only those
+        if self.config.input_files:
+            self.logger.info(f"Using provided input files: {self.config.input_files}")
+            return self.config.input_files
+        
         sources = []
         
         # If specific test requested, generate appropriate sources
@@ -610,10 +936,6 @@ class IntegratedTestRunner:
         else:
             # Generate standard sources with configurable duration
             sources = self.source_generator.generate_all_standard_sources(self.config.video_duration)
-        
-        # Add any provided input files
-        if self.config.input_files:
-            sources.extend(self.config.input_files)
         
         # Remove duplicates
         sources = list(set(sources))
@@ -658,7 +980,7 @@ class IntegratedTestRunner:
                     for input_file in self.config.input_files:
                         self.logger.debug(f"Running test {test_func.__name__} with input_file: {input_file}")
                         try:
-                            result = self.test_runner.run_test(test_func, device, input_file, self.config.workdir)
+                            result = self.test_runner.run_test(test_func, device, input_file, self.config.workdir, self.config.mediastore)
                             all_results.append(result)
                         except Exception as e:
                             self.logger.error(f"Test {test_func.__name__} failed: {e}")
@@ -676,38 +998,6 @@ class IntegratedTestRunner:
         
         return all_results
     
-    def _assess_quality(self, test_results: List[TestResult]) -> List[Dict[str, Any]]:
-        """Assess quality of encoded videos"""
-        quality_results = []
-        
-        # Convert test results to format expected by quality assessor
-        test_results_dict = []
-        for result in test_results:
-            if result.success and result.output_files:
-                test_results_dict.append({
-                    "test_name": result.test_name,
-                    "device_serial": result.device_serial,
-                    "encoder": getattr(result, 'encoder', 'unknown'),
-                    "output_file": result.output_files[0] if result.output_files else None,
-                    "test_data": result.test_data
-                })
-        
-        if not test_results_dict:
-            self.logger.warning("No successful test results for quality assessment")
-            return []
-        
-        # Run quality assessment
-        try:
-            quality_results = self.quality_assessor.batch_assess_quality(
-                test_results_dict, 
-                self.config.workdir,  # Use workdir as reference directory
-                os.path.join(self.config.workdir, "quality_assessment")
-            )
-        except Exception as e:
-            self.logger.error(f"Quality assessment failed: {e}")
-            return []
-        
-        return quality_results
     
     def _generate_reports(self, test_results: List[TestResult], 
                          quality_results: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -721,7 +1011,7 @@ class IntegratedTestRunner:
                 encoder=getattr(result, 'encoder', 'unknown'),
                 success=result.success,
                 duration=result.duration,
-                quality_metrics=result.test_data.get("quality_metrics") if result.test_data else None,
+                quality_metrics=result.quality_metrics,
                 test_data=result.test_data,
                 error_message=result.error_message
             ))
@@ -734,7 +1024,6 @@ class IntegratedTestRunner:
         return reports
     
     def _print_summary(self, test_results: List[TestResult], 
-                      quality_results: List[Dict[str, Any]], 
                       reports: Dict[str, str]):
         """Print execution summary"""
         total_tests = len(test_results)
@@ -749,9 +1038,15 @@ class IntegratedTestRunner:
         print(f"Failed: {failed_tests}")
         print(f"Success Rate: {successful_tests/total_tests*100:.1f}%" if total_tests > 0 else "N/A")
         
-        if quality_results:
-            print(f"Quality Assessments: {len(quality_results)}")
-            psnr_values = [r.get("psnr") for r in quality_results if r.get("psnr") is not None]
+        # Extract quality data from integrated TestResult objects
+        all_quality_data = []
+        for result in test_results:
+            if result.quality_metrics:
+                all_quality_data.extend(result.quality_metrics)
+        
+        if all_quality_data:
+            print(f"Quality Assessments: {len(all_quality_data)}")
+            psnr_values = [r.get("psnr") for r in all_quality_data if r.get("psnr") is not None]
             if psnr_values:
                 print(f"Average PSNR: {sum(psnr_values)/len(psnr_values):.2f} dB")
         
@@ -822,6 +1117,14 @@ def get_options(argv):
         help="Generate video sources and exit"
     )
     parser.add_argument(
+        "--generate-reports-only", action="store_true",
+        help="Generate reports from existing test data without running new tests"
+    )
+    parser.add_argument(
+        "--run-quality-only", action="store_true",
+        help="Run quality assessment on existing test data without running new tests"
+    )
+    parser.add_argument(
         "--video-duration", type=float, default=10.0,
         help="Duration of generated test videos in seconds (default: 10.0)"
     )
@@ -832,6 +1135,10 @@ def get_options(argv):
     parser.add_argument(
         "--disable-device-decode", action="store_true", default=False,
         help="Disable on-device decoding (default: enabled)"
+    )
+    parser.add_argument(
+        "--mediastore", type=str, default="_mediastore",
+        help="Directory for storing reference videos and media files (default: _mediastore)"
     )
     
     options = parser.parse_args(argv[1:])
@@ -846,7 +1153,7 @@ def main(argv):
     if options.workdir is None:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        options.workdir = f"/tmp/ava_tests_{timestamp}"
+        options.workdir = os.path.join(tempfile.gettempdir(), f"ava_tests_{timestamp}")
     
     # Create configuration
     config = TestConfig(
@@ -861,6 +1168,7 @@ def main(argv):
         workdir=options.workdir,
         max_workers=options.max_workers,
         video_duration=options.video_duration,
+        mediastore=options.mediastore,
         use_yuv_encoding=options.use_yuv_encoding,
         enable_device_decode=not options.disable_device_decode
     )
@@ -871,6 +1179,51 @@ def main(argv):
         runner.list_tests()
         return
     
+    if options.generate_reports_only:
+        # Generate reports from existing test data
+        integrated_runner = IntegratedTestRunner(config)
+        
+        # If workdir doesn't exist, try to find existing test data
+        if not os.path.exists(config.workdir):
+            print(f"Workdir does not exist: {config.workdir}")
+            print("Searching for existing test data...")
+            
+            # Search for existing AVA test directories
+            import glob
+            possible_dirs = []
+            
+            # Check common locations
+            search_paths = [
+                "/tmp/ava_tests_*",
+                "/Users/*/tmp/ava_tests_*", 
+                "/Users/*/tmp/workdir",
+                "*/workdir"
+            ]
+            
+            for pattern in search_paths:
+                possible_dirs.extend(glob.glob(pattern))
+            
+            if possible_dirs:
+                print("Found existing test data in:")
+                for i, dir_path in enumerate(possible_dirs):
+                    if os.path.exists(dir_path):
+                        print(f"  {i+1}. {dir_path}")
+                
+                print(f"\nTo use existing data, run with: --workdir <path>")
+                print(f"Example: --workdir {possible_dirs[0]}")
+                return
+            else:
+                print("No existing test data found.")
+                return
+        
+        integrated_runner.generate_reports_only()
+        return
+    
+    if options.run_quality_only:
+        # Run quality assessment on existing test data
+        integrated_runner = IntegratedTestRunner(config)
+        integrated_runner.run_quality_only()
+        return
     
     if options.generate_sources:
         generator = VideoSourceGenerator(debug=config.debug > 0)
@@ -885,7 +1238,7 @@ def main(argv):
     
     try:
         # Run the complete test suite
-        test_results, quality_results, reports = runner.run_tests()
+        test_results, reports = runner.run_tests()
         
         # Exit with appropriate code
         failed_tests = sum(1 for r in test_results if not r.success)

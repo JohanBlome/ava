@@ -7,6 +7,7 @@ import tempfile
 import pathlib
 from typing import Any
 from enum import StrEnum
+from google.protobuf import text_format
 
 # Add lib/encapp/scripts to Python path for encapp imports
 root_path = os.path.join(os.path.dirname(__file__), "..")
@@ -427,7 +428,7 @@ def setup_test_for_mp4_input(
     test.input.pix_fmt = get_compatible_pix_fmt(device, encoder)
     test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
     test.input.resolution = f"{videoinfo['width']}x{videoinfo['height']}"
-    # For CLI usage, use the host path - encapp will handle device file management
+    # Use full path - encapp will copy to mediastore and update paths automatically
     test.input.filepath = input_file
     test.common.id = f"{serial}.{videoname}"
 
@@ -452,7 +453,7 @@ def setup_test_for_input_file(
     # Set basic video properties - encapp will handle transcoding
     test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
     test.input.resolution = f"{videoinfo['width']}x{videoinfo['height']}"
-    # Use host path - encapp will handle device file management
+    # Use full path - encapp will copy to mediastore and update paths automatically
     test.input.filepath = input_file
     print(f"DEBUG: setup_test_for_input_file complete, filepath: {test.input.filepath}")
 
@@ -596,7 +597,7 @@ def run_encapp_test(
     return output_files, testdata
 
 
-def run_encapp_cli(pbtxt_file, device, workdir, mediastore="/tmp/"):
+def run_encapp_cli(pbtxt_file, device, workdir, mediastore="_mediastore"):
     """Run encapp CLI and return the output files."""
     try:
         # Ensure the workdir and all parent directories exist before running encapp CLI
@@ -606,17 +607,21 @@ def run_encapp_cli(pbtxt_file, device, workdir, mediastore="/tmp/"):
         abs_workdir = os.path.abspath(workdir)
         abs_pbtxt_file = os.path.abspath(pbtxt_file)
         
-        # Build encapp CLI command
+        # Build encapp CLI command using direct script path
+        encapp_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lib", "encapp", "scripts", "encapp.py")
         cmd = [
-            "python3", "-m", "encapp",
+            "python3", encapp_script,
             "run",
             abs_pbtxt_file,
             "--serial", device["serial"],
             "--local-workdir", abs_workdir,
-            "--device-workdir", device["device_workdir"],
             "--mediastore", mediastore,
             "--fast-copy"
         ]
+        
+        # Only add --device-workdir if it's not empty
+        if device.get("device_workdir"):
+            cmd.extend(["--device-workdir", device["device_workdir"]])
         
         print(f"Running encapp CLI: {' '.join(cmd)}")
         print(f"Working directory: {abs_workdir}")
@@ -650,7 +655,90 @@ def run_encapp_cli(pbtxt_file, device, workdir, mediastore="/tmp/"):
         return False, []
 
 
-def run_encapp_quality(output_files, workdir, max_parallel=4):
+def run_encapp_stats_to_csv(output_files, workdir, max_parallel=4):
+    """Run encapp_stats_to_csv CLI on all JSON files and return the CSV path."""
+    try:
+        # Find all JSON files in the output (encapp_stats_to_csv expects JSON files, not MP4)
+        json_files = [f for f in output_files if f.endswith('.json')]
+        
+        if not json_files:
+            print("No JSON files found for encoder statistics analysis")
+            return None
+        
+        # Convert relative paths to absolute paths for JSON files
+        json_files_abs = []
+        for json_file in json_files:
+            if not os.path.isabs(json_file):
+                # If it's a relative path, make it absolute relative to current working directory
+                json_files_abs.append(os.path.abspath(json_file))
+            else:
+                json_files_abs.append(json_file)
+        
+        # encapp_stats_to_csv generates output files in the same directory as input files
+        # with names like: {json_filename}_encoding_data.csv, {json_filename}_decoding_data.csv, etc.
+        # We'll run it from the workdir so output files are created there
+        
+        # Build encapp_stats_to_csv CLI command using direct script path
+        encapp_stats_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lib", "encapp", "scripts", "encapp_stats_to_csv.py")
+        cmd = [
+            "python3", encapp_stats_script
+        ]
+        
+        # Add JSON files as positional arguments (these should be the JSON output files from capture)
+        cmd.extend(json_files_abs)
+        
+        # Find the project root by looking for the lib/encapp directory
+        project_root = None
+        current_dir = os.path.abspath(".")
+        while current_dir != "/":
+            if os.path.exists(os.path.join(current_dir, "lib", "encapp")):
+                project_root = current_dir
+                break
+            current_dir = os.path.dirname(current_dir)
+        
+        if not project_root:
+            project_root = os.path.abspath(".")  # Fallback to current directory
+        
+        print(f"Running encapp_stats_to_csv CLI: {' '.join(cmd)}")
+        print(f"Working directory: {workdir}")
+        print(f"JSON files to analyze: {json_files_abs}")
+        print(f"Project root: {project_root}")
+        
+        # Run encapp_stats_to_csv CLI from the project root directory
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_root)
+        
+        print(f"encapp_stats_to_csv exit code: {result.returncode}")
+        if result.stdout:
+            print(f"encapp_stats_to_csv stdout: {result.stdout}")
+        if result.stderr:
+            print(f"encapp_stats_to_csv stderr: {result.stderr}")
+        
+        if result.returncode == 0:
+            # Check for generated CSV files in the workdir
+            # Look for files with patterns: *_encoding_data.csv, *_decoding_data.csv, *_named_ts_timestamps.csv
+            generated_files = []
+            for file in os.listdir(workdir):
+                if (file.endswith('_encoding_data.csv') or 
+                    file.endswith('_decoding_data.csv') or 
+                    file.endswith('_named_ts_timestamps.csv')):
+                    generated_files.append(os.path.join(workdir, file))
+            
+            if generated_files:
+                print(f"Encoder statistics analysis completed. Generated files: {generated_files}")
+                return generated_files  # Return list of generated files
+            else:
+                print("Warning: No CSV files generated by encapp_stats_to_csv")
+                return None
+        else:
+            print(f"encapp_stats_to_csv failed with exit code {result.returncode}")
+            return None
+            
+    except Exception as e:
+        print(f"Error running encapp_stats_to_csv CLI: {e}")
+        return None
+
+
+def run_encapp_quality(output_files, workdir, mediastore="_mediastore", max_parallel=4):
     """Run encapp_quality CLI on all JSON files and return the CSV path."""
     try:
         # Find all JSON files in the output (encapp_quality expects JSON files, not MP4)
@@ -676,34 +764,31 @@ def run_encapp_quality(output_files, workdir, max_parallel=4):
         # Ensure the output directory exists
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         
-        # Find mediastore directory - use absolute path
-        mediastore_path = None
-        possible_mediastore_paths = [
-            "mediastore",
-            "../mediastore",
-            "sources",
-            "../sources"
-        ]
+        # Use the provided mediastore path
+        mediastore_path = os.path.abspath(mediastore)
         
-        for path in possible_mediastore_paths:
-            if os.path.exists(path):
-                mediastore_path = os.path.abspath(path)
-                break
+        if not os.path.exists(mediastore_path):
+            print(f"Warning: Mediastore directory not found: {mediastore_path}")
+            # Try to create it
+            try:
+                os.makedirs(mediastore_path, exist_ok=True)
+                print(f"Created mediastore directory: {mediastore_path}")
+            except Exception as e:
+                print(f"Failed to create mediastore directory: {e}")
+                mediastore_path = os.path.abspath(".")  # Fallback to current directory
         
-        if not mediastore_path:
-            print("Warning: No mediastore/sources directory found")
-            mediastore_path = os.path.abspath(".")  # Fallback to current directory
-        
-        # Build encapp_quality CLI command using module approach
+        # Build encapp_quality CLI command using direct script path
+        encapp_quality_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lib", "encapp", "scripts", "encapp_quality.py")
         cmd = [
-            "python3", "-m", "encapp_quality",
+            "python3", encapp_quality_script,
             "--max-parallel", str(max_parallel),
             "--csv",
             "--output", csv_path,
             "--media", mediastore_path,
             "--header",
             "--keep-quality-files",
-            "--ignore-timing"
+            "--ignore-timing", "true",
+            "--siti"  # Add SI/TI complexity analysis
         ]
         
         # Add JSON files as positional arguments (these should be the JSON output files from capture)
@@ -752,3 +837,7 @@ def run_encapp_quality(output_files, workdir, max_parallel=4):
     except Exception as e:
         print(f"Error running encapp_quality CLI: {e}")
         return None
+
+
+def debug_protobuf(description: str, test_suite: encapp.tests_definitions.TestSuite):
+    print(f"{description}: {text_format.MessageToString(test_suite)}")

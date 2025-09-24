@@ -31,14 +31,10 @@ def test_default_interval(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing default I-frame interval for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "default_interval"
@@ -56,7 +52,7 @@ def test_default_interval(device, input_file, workdir, test_data):
             test,
             input_file,
             device,
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
         )
 
         # Add the actual test name to make it truly unique
@@ -85,7 +81,7 @@ def test_default_interval(device, input_file, workdir, test_data):
             [],
             "na",
             device["serial"],
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
             workdir,
             device_workdir=device["device_workdir"],
             ignore_results=False,
@@ -196,14 +192,10 @@ def test_interval_variable_fps(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing variable FPS I-frame interval for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "interval_variable_fps"
@@ -220,7 +212,7 @@ def test_interval_variable_fps(device, input_file, workdir, test_data):
             test,
             input_file,
             device,
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
         )
 
         test.common.id = f"{__name__}.{test.common.id}"
@@ -251,7 +243,7 @@ def test_interval_variable_fps(device, input_file, workdir, test_data):
             [],
             "na",
             device["serial"],
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
             workdir,
             device_workdir=device["device_workdir"],
             ignore_results=False,

@@ -57,13 +57,6 @@ def test_bitrate_mode_support(device, input_file, workdir, test_data):
     """Test bitrate mode support for the encoder."""
     print(f"Testing bitrate mode support for {device['encoder']}")
     
-    if not encapp:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     # Initialize test data
     test_data["test_name"] = "bitrate_mode_support"
     test_data["device_serial"] = device["serial"]
@@ -95,7 +88,7 @@ def test_bitrate_mode_support(device, input_file, workdir, test_data):
                     test,
                     input_file,
                     device,
-                    "/tmp/",  # mediastore (host path)
+                    mediastore,  # mediastore (host path)
                 )
 
                 # Enable device decoding for MP4 transcoding
@@ -124,7 +117,7 @@ def test_bitrate_mode_support(device, input_file, workdir, test_data):
                     [],
                     "na",
                     device["serial"],
-                    "/tmp/",  # mediastore (host path)
+                    mediastore,  # mediastore (host path)
                     workdir,
                     device_workdir=device["device_workdir"],
                     ignore_results=False,
@@ -192,13 +185,6 @@ def test_bitrate_ladder_vbr(device, input_file, workdir, test_data):
     """Test VBR bitrate ladder using bitrate range."""
     print(f"Running VBR ladder test on {device['encoder']}")
     
-    if not encapp:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     # Initialize test data
     test_data["test_name"] = "bitrate_ladder_vbr"
     test_data["device_serial"] = device["serial"]
@@ -216,11 +202,12 @@ def test_bitrate_ladder_vbr(device, input_file, workdir, test_data):
         test = encapp.tests_definitions.Test()
 
         # Setup test for MP4 input with device decoding
+        mediastore = test_data.get("mediastore", "_mediastore")
         ava_common.setup_test_for_mp4_input(
             test,
             input_file,
             device,
-            "/tmp/",  # mediastore (host path)
+            mediastore,  # mediastore (host path)
         )
 
         # Enable device decoding for MP4 transcoding
@@ -245,14 +232,14 @@ def test_bitrate_ladder_vbr(device, input_file, workdir, test_data):
         testdata[ava_common.DataDefinition.ENCAPP_DEFINITION] = Path(pbtxt_file).name
         
         # Run the test using CLI
-        success, output_files = ava_common.run_encapp_cli(pbtxt_file, device, workdir, "/tmp/")
+        success, output_files = ava_common.run_encapp_cli(pbtxt_file, device, workdir, mediastore)
         
         if success:
             test_data["successful_tests"] = 1
             test_data["total_tests"] = 1
             
             # Run encapp_quality on all output files
-            quality_csv = ava_common.run_encapp_quality(output_files, workdir)
+            quality_csv = ava_common.run_encapp_quality(output_files, workdir, mediastore)
             
             return {
                 "success": True,
@@ -277,20 +264,10 @@ def test_bitrate_ladder_vbr(device, input_file, workdir, test_data):
 
 def test_bitrate_ladder_cbr(device, input_file, workdir, test_data):
     """Test CBR bitrate ladder using bitrate range."""
-    print(f"Running CBR ladder test on {device['encoder']}")
-    print(f"DEBUG: Input file: {input_file}")
-    print(f"DEBUG: Workdir: {workdir}")
-    print(f"DEBUG: Device: {device}")
     
-    if not encapp:
-        print("DEBUG: encapp not available")
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
-    print("DEBUG: encapp is available")
     
     # Initialize test data
     test_data["test_name"] = "bitrate_ladder_cbr"
@@ -338,15 +315,15 @@ def test_bitrate_ladder_cbr(device, input_file, workdir, test_data):
 
         # Add to test suite
         test_suite.test.extend([test])
-        pbtxt_file = f"{workdir}/{test.common.id}.pbtxt"
+        inputfilename = Path(test_data['input_file']).stem
+        pbtxt_file = f"{workdir}/cbr_ladder{inputfilename}.{test_data['encoder']}.pbtxt"
         print(f"DEBUG: Writing pbtxt file: {pbtxt_file}")
         encapp.configfile_write(test_suite, pbtxt_file)
         testdata[ava_common.DataDefinition.ENCAPP_DEFINITION] = Path(pbtxt_file).name
         print(f"DEBUG: pbtxt file written successfully")
-        
-        # Run the test using CLI
+        ava_common.debug_protobuf("test_suite after writing pbtxt file", test_suite)
         print("DEBUG: About to call ava_common.run_encapp_cli")
-        success, output_files = ava_common.run_encapp_cli(pbtxt_file, device, workdir, "/tmp/")
+        success, output_files = ava_common.run_encapp_cli(pbtxt_file, device, workdir, mediastore)
         print(f"DEBUG: run_encapp_cli returned: success={success}, output_files={output_files}")
         
         if success:
@@ -354,13 +331,17 @@ def test_bitrate_ladder_cbr(device, input_file, workdir, test_data):
             test_data["total_tests"] = 1
             
             # Run encapp_quality on all output files
-            quality_csv = ava_common.run_encapp_quality(output_files, workdir)
+            quality_csv = ava_common.run_encapp_quality(output_files, workdir, mediastore)
+            
+            # Run encapp_stats_to_csv on all output files for encoder statistics
+            stats_csv = ava_common.run_encapp_stats_to_csv(output_files, workdir)
             
             return {
                 "success": True,
                 "message": f"CBR ladder test completed with bitrate range {bitrate_range}",
                 "output_files": output_files,
                 "quality_csv": quality_csv,
+                "stats_csv": stats_csv,
                 "test_data": test_data
             }
         else:
@@ -381,12 +362,8 @@ def test_bitrate_ladder_cq(device, input_file, workdir, test_data):
     """Test CQ bitrate ladder across different quality levels."""
     print(f"Running CQ ladder test on {device['encoder']}")
     
-    if not encapp:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "bitrate_ladder_cq"
@@ -416,7 +393,7 @@ def test_bitrate_ladder_cq(device, input_file, workdir, test_data):
                 test,
                 input_file,
                 device,
-                "/tmp/",  # mediastore (host path)
+                mediastore,  # mediastore (host path)
             )
 
             # Enable device decoding for MP4 transcoding
@@ -484,7 +461,7 @@ def test_bitrate_ladder_cq(device, input_file, workdir, test_data):
                 [],
                 "na",
                 device["serial"],
-                "/tmp/",  # mediastore (host path)
+                mediastore,  # mediastore (host path)
                 workdir,
                 device_workdir=device["device_workdir"],
                 ignore_results=False,
@@ -557,12 +534,8 @@ def test_bitrate_ladder_qprange(device, input_file, workdir, test_data):
     """Test QP Range bitrate ladder across different QP ranges."""
     print(f"Running QP Range ladder test on {device['encoder']}")
     
-    if not encapp:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "bitrate_ladder_qprange"
@@ -599,7 +572,7 @@ def test_bitrate_ladder_qprange(device, input_file, workdir, test_data):
                 test,
                 input_file,
                 device,
-                "/tmp/",  # mediastore (host path)
+                mediastore,  # mediastore (host path)
             )
 
             # Enable device decoding for MP4 transcoding
@@ -655,7 +628,7 @@ def test_bitrate_ladder_qprange(device, input_file, workdir, test_data):
                 [],
                 "na",
                 device["serial"],
-                "/tmp/",  # mediastore (host path)
+                mediastore,  # mediastore (host path)
                 workdir,
                 device_workdir=device["device_workdir"],
                 ignore_results=False,

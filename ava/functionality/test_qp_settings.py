@@ -36,14 +36,10 @@ def test_qp_simple(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing QP settings for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "qp_simple"
@@ -62,7 +58,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
             test,
             input_file,
             device,
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
         )
 
         # Add the actual test name to make it truly unique
@@ -91,7 +87,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
             [],
             "na",
             device["serial"],
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
             workdir,
             device_workdir=device["device_workdir"],
             ignore_results=False,
@@ -165,7 +161,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
             test,
             input_file,
             device,
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
         )
 
         # Add the actual test name to make it truly unique
@@ -222,7 +218,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
             [],
             "na",
             device["serial"],
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
             workdir,
             device_workdir=device["device_workdir"],
             ignore_results=False,
@@ -330,14 +326,10 @@ def test_qp_bound_ladder(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing QP bound ladder for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "qp_bound_ladder"

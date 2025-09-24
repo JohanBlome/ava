@@ -34,14 +34,10 @@ def test_chroma_offset_cbr_hlg(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing chroma offset CBR HLG for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "chroma_offset_cbr_hlg"
@@ -68,7 +64,7 @@ def test_chroma_offset_cbr_hlg(device, input_file, workdir, test_data):
             )
             
             files, testdata = ava_common.run_capture(
-                device, input_file, {"local_workdir": workdir, "mediastore": "/tmp"}, 
+                device, input_file, {"local_workdir": workdir, "mediastore": mediastore}, 
                 f"{bitrate}bps", "cbr", __name__, test
             )
 
@@ -138,14 +134,10 @@ def test_chroma_offset_vbr_hlg(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing chroma offset VBR HLG for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "chroma_offset_vbr_hlg"
@@ -172,7 +164,7 @@ def test_chroma_offset_vbr_hlg(device, input_file, workdir, test_data):
             )
             
             files, testdata = ava_common.run_capture(
-                device, input_file, {"local_workdir": workdir, "mediastore": "/tmp"}, 
+                device, input_file, {"local_workdir": workdir, "mediastore": mediastore}, 
                 f"{bitrate}bps", "vbr", __name__, test
             )
 
@@ -245,14 +237,10 @@ def test_chroma_offset_qprange_hlg(device, input_file, workdir, test_data):
     Returns:
         Dictionary with test results
     """
-    if not ENCAPP_AVAILABLE:
-        return {
-            "success": False,
-            "error": "encapp not available",
-            "test_data": test_data
-        }
-    
     print(f"Testing chroma offset QP range HLG for {device['encoder']}")
+    
+    # Get mediastore from test_data
+    mediastore = test_data.get("mediastore", "_mediastore")
     
     # Initialize test data
     test_data["test_name"] = "chroma_offset_qprange_hlg"
@@ -270,7 +258,7 @@ def test_chroma_offset_qprange_hlg(device, input_file, workdir, test_data):
             test,
             input_file,
             device,
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
         )
 
         # Add the actual test name to make it truly unique
@@ -335,7 +323,7 @@ def test_chroma_offset_qprange_hlg(device, input_file, workdir, test_data):
             [],
             "na",
             device["serial"],
-            "/tmp",  # mediastore
+            mediastore,  # mediastore
             workdir,
             device_workdir=device["device_workdir"],
             ignore_results=False,
