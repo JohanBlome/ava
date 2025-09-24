@@ -86,6 +86,7 @@ class TestResult:
     output_files: List[str]
     test_data: Dict[str, Any]
     error_message: Optional[str] = None
+    quality_metrics: Optional[Dict[str, Any]] = None
     traceback: Optional[str] = None
 
 
@@ -448,6 +449,7 @@ class TestRunner:
             
             # Prepare test data
             test_data = {}
+            quality_metrics = {}  # Initialize quality_metrics here
             encapp, ava_common, ava_version = _import_optional_modules()
             if ENCAPP_AVAILABLE:
                 try:
@@ -466,6 +468,7 @@ class TestRunner:
                 output_files = []
                 test_success = True
                 error_message = None
+                # quality_metrics already initialized above
             else:
                 # Call the test function with appropriate parameters
                 self.logger.debug(f"Calling test function with input_file: {input_file}")
@@ -510,7 +513,7 @@ class TestRunner:
                     test_success = True
                     output_files = []
                     error_message = None
-                    quality_metrics = {}
+                    # quality_metrics already initialized above
             
             duration = time.time() - start_time
             
@@ -540,6 +543,7 @@ class TestRunner:
                 output_files=[],
                 test_data={},
                 error_message=error_msg,
+                quality_metrics={},
                 traceback=tb
             )
 

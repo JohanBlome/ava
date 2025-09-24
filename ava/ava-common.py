@@ -325,19 +325,6 @@ def encapp_get_encoder_name(output_dict: dict[str, Any], mime_type: str):
     return filtered_canonical_names
 
 
-def video_to_yuv(input_filepath: str, output_filepath: str, pix_fmt: str):
-    # lazy but let us skip transcodig if the target is already there...
-    print("Convert video to yuv")
-    if not os.path.exists(output_filepath):
-        cmd = f"ffmpeg -y -loglevel error -hide_banner -i {input_filepath} -pix_fmt {pix_fmt} {output_filepath}"
-        returncode, out, err, stats = run(cmd, logfd=None, debug=1, gnu_time=GNU_TIME)
-        if returncode != 0:
-            print(f"Error: {err}")
-            # raise Exception(f"Error: {stderr}")
-    else:
-        print("Warning, transcoded file exists, assuming it is correct")
-
-
 def setup_test_for_input_file(
     test: encapp.tests_definitions.Test,
     input_file: str,
@@ -348,16 +335,13 @@ def setup_test_for_input_file(
     videoinfo = encapp.encapp_tool.ffutils.get_video_info(input_file)
     device_workdir = device.get("device_workdir", "")
     serial = device.get("serial", "")
-    # if we want to run a raw video i.e. nv12 it needs to be converted
     videoname = pathlib.Path(input_file).stem
-    yuvfile = f"{videoname}.yuv"
-    video_to_yuv(f"{input_file}", f"{mediastore}/{yuvfile}", "nv12")
-    files_to_push.append(f"{mediastore}/{yuvfile}")
 
-    test.input.pix_fmt = encapp.tests_definitions.PixFmt.nv12
+    # Set basic video properties - encapp will handle transcoding
     test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
     test.input.resolution = f"{videoinfo['width']}x{videoinfo['height']}"
-    test.input.filepath = f"{device_workdir}/{yuvfile}"
+    # Use host path - encapp will handle device file management
+    test.input.filepath = input_file
     test.common.id = f"{serial}.{videoname}"
 
 
@@ -381,7 +365,6 @@ def run_capture(
     test_suite = encapp.tests_definitions.TestSuite()
     test = encapp.tests_definitions.Test()
 
-    files_to_push = []
     # Looks at the source file and sets props accordingly. We need unique files.
     setup_test_for_input_file(
         test,

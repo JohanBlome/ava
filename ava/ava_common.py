@@ -359,17 +359,48 @@ def encapp_get_encoder_name(output_dict: dict[str, Any], mime_type: str):
     return filtered_canonical_names
 
 
-def video_to_yuv(input_filepath: str, output_filepath: str, pix_fmt: str):
-    # lazy but let us skip transcodig if the target is already there...
-    print("Convert video to yuv")
-    if not os.path.exists(output_filepath):
-        cmd = f"ffmpeg -y -loglevel error -hide_banner -i {input_filepath} -pix_fmt {pix_fmt} {output_filepath}"
-        returncode, out, err, stats = run(cmd, logfd=None, debug=1, gnu_time=GNU_TIME)
-        if returncode != 0:
-            print(f"Error: {err}")
-            # raise Exception(f"Error: {stderr}")
-    else:
-        print("Warning, transcoded file exists, assuming it is correct")
+
+def get_compatible_pix_fmt(device: dict, encoder: str) -> Any:
+    """Get a compatible pixel format for the encoder based on its capabilities."""
+    if not encapp:
+        return encapp.tests_definitions.PixFmt.nv12  # Default fallback
+    
+    try:
+        encoder_info = device.get("encoder_info", None)
+        if not encoder_info:
+            return encapp.tests_definitions.PixFmt.nv12  # Default fallback
+            
+        mt = encoder_info.get("media_type", None)
+        if not mt:
+            return encapp.tests_definitions.PixFmt.nv12  # Default fallback
+            
+        caps = mt.get("encoder_capabilities", None)
+        if not caps:
+            return encapp.tests_definitions.PixFmt.nv12  # Default fallback
+        
+        # Check for supported color formats in order of preference
+        # Priority: nv12 (most common), yuv420p, nv21, rgba
+        color_formats = caps.get("color_formats", [])
+        
+        # Map Android color format constants to encapp PixFmt
+        color_format_map = {
+            20: encapp.tests_definitions.PixFmt.nv12,  # COLOR_FormatYUV420SemiPlanar
+            19: encapp.tests_definitions.PixFmt.yuv420p,  # COLOR_FormatYUV420Planar
+            21: encapp.tests_definitions.PixFmt.nv21,  # COLOR_FormatYUV420PackedSemiPlanar
+            22: encapp.tests_definitions.PixFmt.rgba,  # COLOR_Format32bitARGB8888
+        }
+        
+        # Find the first supported format in order of preference
+        for color_format in [20, 19, 21, 22]:  # nv12, yuv420p, nv21, rgba
+            if color_format in color_formats:
+                return color_format_map[color_format]
+        
+        # If no specific formats found, default to nv12
+        return encapp.tests_definitions.PixFmt.nv12
+        
+    except Exception as e:
+        print(f"Warning: Could not determine compatible pixel format: {e}")
+        return encapp.tests_definitions.PixFmt.nv12  # Default fallback
 
 
 def setup_test_for_mp4_input(
@@ -377,7 +408,6 @@ def setup_test_for_mp4_input(
     input_file: str,
     device: list[str],
     mediastore: str,
-    files_to_push: list[str],
 ) -> None:
     """Setup test for MP4 input with device decoding (transcoding)"""
     if not encapp or not encapp_tool:
@@ -386,21 +416,19 @@ def setup_test_for_mp4_input(
     videoinfo = encapp.encapp_tool.ffutils.get_video_info(input_file)
     device_workdir = device.get("device_workdir", "")
     serial = device.get("serial", "")
+    encoder = device.get("encoder", "")
     
     # For MP4 transcoding, we push the original file and let the device decode it
     videoname = pathlib.Path(input_file).stem
     mp4file = f"{videoname}.mp4"
     
-    # Copy the input file to mediastore
-    import shutil
-    shutil.copy2(input_file, f"{mediastore}/{mp4file}")
-    files_to_push.append(f"{mediastore}/{mp4file}")
-
     # Configure for MP4 input with device decoding
-    test.input.pix_fmt = encapp.tests_definitions.PixFmt.surface  # Use surface for device decoding
+    # Use a compatible pixel format based on encoder capabilities
+    test.input.pix_fmt = get_compatible_pix_fmt(device, encoder)
     test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
     test.input.resolution = f"{videoinfo['width']}x{videoinfo['height']}"
-    test.input.filepath = f"{device_workdir}/{mp4file}"
+    # For CLI usage, use the host path - encapp will handle device file management
+    test.input.filepath = input_file
     test.common.id = f"{serial}.{videoname}"
 
 
@@ -409,25 +437,24 @@ def setup_test_for_input_file(
     input_file: str,
     device: list[str],
     mediastore: str,
-    files_to_push: list[str],
 ) -> None:
+    print(f"DEBUG: setup_test_for_input_file called with input_file: {input_file}")
     if not encapp or not encapp_tool:
+        print("DEBUG: encapp not available in setup_test_for_input_file")
         raise ImportError("encapp not available")
         
+    print("DEBUG: Getting video info")
     videoinfo = encapp.encapp_tool.ffutils.get_video_info(input_file)
     device_workdir = device.get("device_workdir", "")
     serial = device.get("serial", "")
-    # if we want to run a raw video i.e. nv12 it needs to be converted
-    videoname = pathlib.Path(input_file).stem
-    yuvfile = f"{videoname}.yuv"
-    video_to_yuv(f"{input_file}", f"{mediastore}/{yuvfile}", "nv12")
-    files_to_push.append(f"{mediastore}/{yuvfile}")
+    print(f"DEBUG: Video info: {videoinfo}")
 
-    test.input.pix_fmt = encapp.tests_definitions.PixFmt.nv12
+    # Set basic video properties - encapp will handle transcoding
     test.input.framerate = int(round(float(videoinfo["framerate"]), 0))
     test.input.resolution = f"{videoinfo['width']}x{videoinfo['height']}"
-    test.input.filepath = f"{device_workdir}/{yuvfile}"
-    test.common.id = f"{serial}.{videoname}"
+    # Use host path - encapp will handle device file management
+    test.input.filepath = input_file
+    print(f"DEBUG: setup_test_for_input_file complete, filepath: {test.input.filepath}")
 
 
 # OLD run_capture function removed - replaced with create_test_template() and run_encapp_test()
@@ -567,3 +594,161 @@ def run_encapp_test(
         raise RuntimeError(f"No output files from test: {test.common.id}")
     
     return output_files, testdata
+
+
+def run_encapp_cli(pbtxt_file, device, workdir, mediastore="/tmp/"):
+    """Run encapp CLI and return the output files."""
+    try:
+        # Ensure the workdir and all parent directories exist before running encapp CLI
+        os.makedirs(workdir, exist_ok=True)
+        
+        # Convert to absolute paths to avoid working directory issues
+        abs_workdir = os.path.abspath(workdir)
+        abs_pbtxt_file = os.path.abspath(pbtxt_file)
+        
+        # Build encapp CLI command
+        cmd = [
+            "python3", "-m", "encapp",
+            "run",
+            abs_pbtxt_file,
+            "--serial", device["serial"],
+            "--local-workdir", abs_workdir,
+            "--device-workdir", device["device_workdir"],
+            "--mediastore", mediastore,
+            "--fast-copy"
+        ]
+        
+        print(f"Running encapp CLI: {' '.join(cmd)}")
+        print(f"Working directory: {abs_workdir}")
+        print(f"Device workdir: {device['device_workdir']}")
+        print(f"Current working directory: {os.getcwd()}")
+        
+        # Run encapp CLI from the current working directory (not workdir)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        print(f"encapp exit code: {result.returncode}")
+        if result.stdout:
+            print(f"encapp stdout: {result.stdout}")
+        if result.stderr:
+            print(f"encapp stderr: {result.stderr}")
+        
+        if result.returncode == 0:
+            # Find output files in the workdir
+            output_files = []
+            for file in os.listdir(workdir):
+                if file.endswith(('.json', '.mp4')):
+                    output_files.append(os.path.join(workdir, file))
+            
+            print(f"Found output files: {output_files}")
+            return True, output_files
+        else:
+            print(f"encapp failed with exit code {result.returncode}")
+            return False, []
+            
+    except Exception as e:
+        print(f"Error running encapp CLI: {e}")
+        return False, []
+
+
+def run_encapp_quality(output_files, workdir, max_parallel=4):
+    """Run encapp_quality CLI on all JSON files and return the CSV path."""
+    try:
+        # Find all JSON files in the output (encapp_quality expects JSON files, not MP4)
+        json_files = [f for f in output_files if f.endswith('.json')]
+        
+        if not json_files:
+            print("No JSON files found for quality analysis")
+            return None
+        
+        # Convert relative paths to absolute paths for JSON files
+        json_files_abs = []
+        for json_file in json_files:
+            if not os.path.isabs(json_file):
+                # If it's a relative path, make it absolute relative to current working directory
+                json_files_abs.append(os.path.abspath(json_file))
+            else:
+                json_files_abs.append(json_file)
+        
+        # Save quality output directly to workdir with a suitable name
+        csv_filename = "quality_analysis.csv"
+        csv_path = os.path.abspath(os.path.join(workdir, csv_filename))
+        
+        # Ensure the output directory exists
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        
+        # Find mediastore directory - use absolute path
+        mediastore_path = None
+        possible_mediastore_paths = [
+            "mediastore",
+            "../mediastore",
+            "sources",
+            "../sources"
+        ]
+        
+        for path in possible_mediastore_paths:
+            if os.path.exists(path):
+                mediastore_path = os.path.abspath(path)
+                break
+        
+        if not mediastore_path:
+            print("Warning: No mediastore/sources directory found")
+            mediastore_path = os.path.abspath(".")  # Fallback to current directory
+        
+        # Build encapp_quality CLI command using module approach
+        cmd = [
+            "python3", "-m", "encapp_quality",
+            "--max-parallel", str(max_parallel),
+            "--csv",
+            "--output", csv_path,
+            "--media", mediastore_path,
+            "--header",
+            "--keep-quality-files",
+            "--ignore-timing"
+        ]
+        
+        # Add JSON files as positional arguments (these should be the JSON output files from capture)
+        cmd.extend(json_files_abs)
+        
+        # Find the project root by looking for the lib/encapp directory
+        project_root = None
+        current_dir = os.path.abspath(".")
+        while current_dir != "/":
+            if os.path.exists(os.path.join(current_dir, "lib", "encapp")):
+                project_root = current_dir
+                break
+            current_dir = os.path.dirname(current_dir)
+        
+        if not project_root:
+            project_root = os.path.abspath(".")  # Fallback to current directory
+        
+        print(f"Running encapp_quality CLI: {' '.join(cmd)}")
+        print(f"Working directory: {workdir}")
+        print(f"JSON files to analyze: {json_files_abs}")
+        print(f"Output CSV: {csv_path}")
+        print(f"Mediastore directory: {mediastore_path}")
+        print(f"Project root: {project_root}")
+        
+        # Run encapp_quality CLI from the project root directory
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=project_root)
+        
+        print(f"encapp_quality exit code: {result.returncode}")
+        if result.stdout:
+            print(f"encapp_quality stdout: {result.stdout}")
+        if result.stderr:
+            print(f"encapp_quality stderr: {result.stderr}")
+        
+        if result.returncode == 0:
+            # Check if CSV file was created
+            if os.path.exists(csv_path):
+                print(f"Quality analysis completed: {csv_path}")
+                return csv_path
+            else:
+                print("Warning: No CSV file generated by encapp_quality")
+                return None
+        else:
+            print(f"encapp_quality failed with exit code {result.returncode}")
+            return None
+            
+    except Exception as e:
+        print(f"Error running encapp_quality CLI: {e}")
+        return None

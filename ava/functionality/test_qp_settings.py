@@ -57,14 +57,12 @@ def test_qp_simple(device, input_file, workdir, test_data):
         test_suite = encapp.tests_definitions.TestSuite()
         test = encapp.tests_definitions.Test()
 
-        files_to_push = []
         # Setup test for input file
         ava_common.setup_test_for_input_file(
             test,
             input_file,
             device,
             "/tmp",  # mediastore
-            files_to_push,
         )
 
         # Add the actual test name to make it truly unique
@@ -90,7 +88,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
         # Actual test run
         result = encapp.run_codec_tests(
             test_suite,
-            files_to_push,
+            [],
             "na",
             device["serial"],
             "/tmp",  # mediastore
@@ -162,14 +160,12 @@ def test_qp_simple(device, input_file, workdir, test_data):
         test_suite = encapp.tests_definitions.TestSuite()
         test = encapp.tests_definitions.Test()
 
-        files_to_push = []
         # Setup test for input file
         ava_common.setup_test_for_input_file(
             test,
             input_file,
             device,
             "/tmp",  # mediastore
-            files_to_push,
         )
 
         # Add the actual test name to make it truly unique
@@ -190,7 +186,6 @@ def test_qp_simple(device, input_file, workdir, test_data):
         # Write the test to file since it will have an anonymized name otherwise
         pbtxt_file = f"{workdir}/{test.common.id}.pbtxt"
         encapp.configfile_write(test_suite, pbtxt_file)
-        files_to_push.append(pbtxt_file)
         testdata[ava_common.DataDefinition.ENCAPP_DEFINITION] = Path(pbtxt_file).name
 
         # Calculate adjusted QP range
@@ -224,7 +219,7 @@ def test_qp_simple(device, input_file, workdir, test_data):
         # Actual test run
         result = encapp.run_codec_tests(
             test_suite,
-            files_to_push,
+            [],
             "na",
             device["serial"],
             "/tmp",  # mediastore
