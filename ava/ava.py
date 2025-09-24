@@ -881,9 +881,10 @@ class IntegratedTestRunner:
                     device_serial = parts[0]
                     test_name = '_'.join(parts[1:])
                     
-                    # Look for output files and quality CSV
+                    # Look for output files, quality CSV, and stats CSV files
                     output_files = []
                     quality_csv = None
+                    stats_csv_files = []
                     
                     for file in os.listdir(item_path):
                         file_path = os.path.join(item_path, file)
@@ -891,12 +892,16 @@ class IntegratedTestRunner:
                             output_files.append(file_path)
                         elif file == 'quality_analysis.csv':
                             quality_csv = file_path
+                        elif file.endswith('_encoding_data.csv'):
+                            stats_csv_files.append(file_path)
                     
                     if output_files:
                         # Create TestResult from existing data
                         test_data = {}
                         if quality_csv:
                             test_data["quality_csv"] = quality_csv
+                        if stats_csv_files:
+                            test_data["stats_csv"] = stats_csv_files
                         
                         test_result = TestResult(
                             test_name=test_name,
