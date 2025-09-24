@@ -41,16 +41,12 @@ ENCAPP_AVAILABLE = False
 def _import_optional_modules():
     """Import optional modules only when needed"""
     global ENCAPP_AVAILABLE
-    try:
-        # Import ava_common first (it handles encapp imports internally)
-        from . import ava_common
-        ENCAPP_AVAILABLE = True
-        # ava_version is optional
-        ava_version = None
-        return ava_common.encapp, ava_common, ava_version
-    except ImportError:
-        ENCAPP_AVAILABLE = False
-        return None, None, None
+    # Import ava_common first (it handles encapp imports internally)
+    from . import ava_common
+    ENCAPP_AVAILABLE = True
+    # ava_version is optional
+    ava_version = None
+    return ava_common.encapp, ava_common, ava_version
 
 
 @dataclass
@@ -170,10 +166,7 @@ class DeviceManager:
         """Discover connected devices and their capabilities"""
         self.logger.info("Starting device discovery...")
         encapp, ava_common, ava_version = _import_optional_modules()
-        if not ENCAPP_AVAILABLE:
-            self.logger.info("encapp not available, using ADB directly")
-            # Try to discover devices using ADB directly
-            return self._discover_devices_with_adb()
+        self.logger.info("Using encapp for device discovery")
         
         # Use ava_common for device discovery if available
         try:
@@ -465,11 +458,10 @@ class TestRunner:
             test_data = {}
             quality_metrics = {}  # Initialize quality_metrics here
             encapp, ava_common, ava_version = _import_optional_modules()
-            if ENCAPP_AVAILABLE:
-                try:
-                    test_data = ava_common.initialize_testdata()
-                except:
-                    test_data = {}
+            try:
+                test_data = ava_common.initialize_testdata()
+            except:
+                test_data = {}
             
             # Add configuration options from config
             test_data["video_duration"] = self.config.video_duration
