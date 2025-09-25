@@ -957,11 +957,11 @@ class ReportGenerator:
                         codec_type = self._get_codec_type(codec)
                         trace_name = self._get_trace_name(codec, model)
         
-        fig.add_trace(
-            go.Scatter(
+                        fig.add_trace(
+                            go.Scatter(
                                 x=device_data['ti_avg'].tolist(),
                                 y=device_data['si_avg'].tolist(),
-                mode='markers',
+                                mode='markers',
                                 name=trace_name,
                                 marker=dict(size=8, color=color),
                                 hovertemplate=f'<b>{codec} ({model})</b><br>' +
@@ -972,7 +972,7 @@ class ReportGenerator:
                                 showlegend=False
                             ),
                             row=2, col=1
-            )
+                        )
         
         # Update layout
         fig.update_layout(
