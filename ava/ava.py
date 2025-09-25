@@ -67,6 +67,7 @@ class TestConfig:
     enable_device_decode: bool = True
     mediastore: str = "_mediastore"
     quality_data: Optional[List[str]] = None
+    quality_data_labels: Optional[List[str]] = None
     
     def __post_init__(self):
         if self.android_serials is None:
@@ -75,6 +76,8 @@ class TestConfig:
             self.input_files = [f"{Path(__file__).parent}/../vid/johnny.1280x720.60fps.264.mp4"]
         if self.quality_data is None:
             self.quality_data = []
+        if self.quality_data_labels is None:
+            self.quality_data_labels = []
 
 
 @dataclass
@@ -963,7 +966,7 @@ class IntegratedTestRunner:
         """Load test results from directly specified quality CSV files"""
         test_results = []
         
-        for quality_csv in self.config.quality_data:
+        for i, quality_csv in enumerate(self.config.quality_data):
             if not os.path.exists(quality_csv):
                 self.logger.warning(f"Quality CSV file not found: {quality_csv}")
                 continue
@@ -992,23 +995,31 @@ class IntegratedTestRunner:
             test_name = "quality_analysis"
             device_serial = "unknown"
             
-            # Try to extract info from CSV content
-            try:
-                import pandas as pd
-                df = pd.read_csv(quality_csv)
-                if not df.empty:
-                    # Get unique codecs and devices from the CSV
-                    codecs = df['codec'].unique() if 'codec' in df.columns else ['unknown']
-                    devices = df['serial'].unique() if 'serial' in df.columns else ['unknown']
-                    
-                    # Use the first codec and device for naming
-                    if len(codecs) > 0 and codecs[0] != 'unknown':
-                        test_name = f"quality_analysis_{codecs[0]}"
-                    if len(devices) > 0 and devices[0] != 'unknown':
-                        device_serial = devices[0]
+            # Use custom label if provided, otherwise extract from CSV content
+            if (self.config.quality_data_labels and 
+                i < len(self.config.quality_data_labels) and 
+                self.config.quality_data_labels[i]):
+                # Use custom label for test name
+                test_name = f"quality_analysis_{self.config.quality_data_labels[i]}"
+                self.logger.info(f"Using custom label: {self.config.quality_data_labels[i]}")
+            else:
+                # Try to extract info from CSV content (original behavior)
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(quality_csv)
+                    if not df.empty:
+                        # Get unique codecs and devices from the CSV
+                        codecs = df['codec'].unique() if 'codec' in df.columns else ['unknown']
+                        devices = df['serial'].unique() if 'serial' in df.columns else ['unknown']
                         
-            except Exception as e:
-                self.logger.warning(f"Could not extract metadata from {quality_csv}: {e}")
+                        # Use the first codec and device for naming
+                        if len(codecs) > 0 and codecs[0] != 'unknown':
+                            test_name = f"quality_analysis_{codecs[0]}"
+                        if len(devices) > 0 and devices[0] != 'unknown':
+                            device_serial = devices[0]
+                            
+                except Exception as e:
+                    self.logger.warning(f"Could not extract metadata from {quality_csv}: {e}")
             
             test_result = TestResult(
                 test_name=test_name,
@@ -1248,6 +1259,10 @@ def get_options(argv):
         "--quality-data", type=str,
         help="Comma-separated list of quality CSV files to analyze (alternative to --workdir)"
     )
+    parser.add_argument(
+        "--quality-data-labels", type=str,
+        help="Comma-separated list of labels for quality CSV files (must match order of --quality-data files)"
+    )
     
     options = parser.parse_args(argv[1:])
     return options
@@ -1268,6 +1283,18 @@ def main(argv):
     if options.quality_data:
         quality_data = [f.strip() for f in options.quality_data.split(',') if f.strip()]
     
+    # Parse quality_data_labels if provided
+    quality_data_labels = []
+    if options.quality_data_labels:
+        quality_data_labels = [f.strip() for f in options.quality_data_labels.split(',') if f.strip()]
+        
+        # Validate that labels match quality_data count
+        if quality_data and len(quality_data_labels) != len(quality_data):
+            print(f"Error: Number of quality-data-labels ({len(quality_data_labels)}) must match number of quality-data files ({len(quality_data)})")
+            print(f"Quality data files: {quality_data}")
+            print(f"Quality data labels: {quality_data_labels}")
+            sys.exit(1)
+    
     # Create configuration
     config = TestConfig(
         debug=options.debug,
@@ -1284,7 +1311,8 @@ def main(argv):
         mediastore=options.mediastore,
         use_yuv_encoding=options.use_yuv_encoding,
         enable_device_decode=not options.disable_device_decode,
-        quality_data=quality_data
+        quality_data=quality_data,
+        quality_data_labels=quality_data_labels
     )
     
     # Handle special commands

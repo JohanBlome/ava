@@ -113,6 +113,10 @@ class ReportGenerator:
                             # Add device info to the dataframe
                             df['device_serial'] = result.device_serial
                             df['test_name'] = result.test_name
+                            
+                            # Apply custom labels if this is a custom labeled test
+                            df = self._apply_custom_labels_to_dataframe(df, result)
+                            
                             all_data.append(df)
                     except pd.errors.EmptyDataError:
                         # Skip empty CSV files (e.g., when quality analysis fails)
@@ -765,6 +769,10 @@ class ReportGenerator:
                             # Add device info to the dataframe
                             df['device_serial'] = result.device_serial
                             df['test_name'] = result.test_name
+                            
+                            # Apply custom labels if this is a custom labeled test
+                            df = self._apply_custom_labels_to_dataframe(df, result)
+                            
                             all_data.append(df)
                     except pd.errors.EmptyDataError:
                         # Skip empty CSV files (e.g., when quality analysis fails)
@@ -2559,6 +2567,10 @@ class ReportGenerator:
                             # Add device info to the dataframe
                             df['device_serial'] = result.device_serial
                             df['test_name'] = result.test_name
+                            
+                            # Apply custom labels if this is a custom labeled test
+                            df = self._apply_custom_labels_to_dataframe(df, result)
+                            
                             all_data.append(df)
                     except pd.errors.EmptyDataError:
                         self.logger.warning(f"Skipping empty quality CSV file: {csv_file}")
@@ -2663,24 +2675,8 @@ class ReportGenerator:
             return html_content
         
         # Create BD-Rate section content
-        # Extract available codecs from all test results
-        available_codecs = []
-        if test_results:
-            # Get codecs from all test results' quality data
-            for result in test_results:
-                if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
-                    csv_file = result.test_data['quality_csv']
-                    if os.path.exists(csv_file):
-                        try:
-                            df = pd.read_csv(csv_file)
-                            if 'codec' in df.columns:
-                                codecs_in_file = df['codec'].unique().tolist()
-                                available_codecs.extend(codecs_in_file)
-                        except Exception as e:
-                            self.logger.warning(f"Failed to read CSV for codec extraction: {e}")
-            
-            # Remove duplicates and sort
-            available_codecs = sorted(list(set(available_codecs)))
+        # Extract available codecs from all test results (handles custom labels)
+        available_codecs = self._get_available_codecs_from_results(test_results) if test_results else []
         
         bd_section_content = self._create_bd_rate_html_content(bd_visualizations, available_codecs)
         
@@ -3024,20 +3020,35 @@ class ReportGenerator:
         
         return updated_html
 
+    def _apply_custom_labels_to_dataframe(self, df: pd.DataFrame, result: TestResult) -> pd.DataFrame:
+        """Apply custom labels to dataframe if this is a custom labeled test"""
+        if result.test_name.startswith("quality_analysis_") and len(result.test_name.split("_")) > 2:
+            custom_label = "_".join(result.test_name.split("_")[2:])  # Everything after "quality_analysis_"
+            if 'codec' in df.columns:
+                df['codec'] = custom_label
+        return df
+
     def _get_available_codecs_from_results(self, test_results: List[TestResult]) -> List[str]:
         """Extract available codecs from test results"""
         available_codecs = []
         for result in test_results:
             if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
-                csv_file = result.test_data['quality_csv']
-                if os.path.exists(csv_file):
-                    try:
-                        df = pd.read_csv(csv_file)
-                        if 'codec' in df.columns:
-                            codecs_in_file = df['codec'].unique().tolist()
-                            available_codecs.extend(codecs_in_file)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to read CSV for codec extraction: {e}")
+                # Check if this is a custom labeled test (quality_analysis_<label>)
+                if result.test_name.startswith("quality_analysis_") and len(result.test_name.split("_")) > 2:
+                    # Extract the custom label from test_name
+                    custom_label = "_".join(result.test_name.split("_")[2:])  # Everything after "quality_analysis_"
+                    available_codecs.append(custom_label)
+                else:
+                    # Original behavior: extract codecs from CSV
+                    csv_file = result.test_data['quality_csv']
+                    if os.path.exists(csv_file):
+                        try:
+                            df = pd.read_csv(csv_file)
+                            if 'codec' in df.columns:
+                                codecs_in_file = df['codec'].unique().tolist()
+                                available_codecs.extend(codecs_in_file)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to read CSV for codec extraction: {e}")
         
         # Remove duplicates and sort
         return sorted(list(set(available_codecs)))
