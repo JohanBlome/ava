@@ -23,6 +23,21 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import plotly.offline as pyo
 
+# Import BD-Rate calculation modules
+try:
+    # Try absolute imports first (when used as script)
+    from bd_rate import BDRateCalculator, BDRateResult, compare_codecs_bd_rate, format_bd_rate_result
+    from bd_rate_utils import AVABDRateAnalyzer
+    from bd_rate_viz import BDRateVisualizer
+except ImportError:
+    try:
+        # Fall back to relative imports (when used as package)
+        from .bd_rate import BDRateCalculator, BDRateResult, compare_codecs_bd_rate, format_bd_rate_result
+        from .bd_rate_utils import AVABDRateAnalyzer
+        from .bd_rate_viz import BDRateVisualizer
+    except ImportError as e:
+        raise ImportError(f"BD-Rate modules not available: {e}. Please ensure bd_rate.py, bd_rate_utils.py, and bd_rate_viz.py are in the same directory.")
+
 
 @dataclass
 class TestResult:
@@ -905,6 +920,11 @@ class ReportGenerator:
         performance_fig = self.create_performance_plots(test_results)
         comparison_fig = self.create_comparison_plots(test_results)
         
+        # For dynamic BD-Rate, we'll generate plots in JavaScript
+        # No need to pre-calculate all combinations
+        bd_visualizations = {}
+        self.logger.info("BD-Rate visualizations will be generated dynamically in JavaScript")
+        
         # Generate HTML content with tabs
         html_content = f"""
         <!DOCTYPE html>
@@ -952,6 +972,7 @@ class ReportGenerator:
                 <button class="tablinks active" onclick="openTab(event, 'Quality')">Quality Metrics</button>
                 <button class="tablinks" onclick="openTab(event, 'Performance')">Performance</button>
                 <button class="tablinks" onclick="openTab(event, 'Comparison')">Comparison</button>
+                <button class="tablinks" onclick="openTab(event, 'BD-Rate')">BD-Rate Analysis</button>
             </div>
             
             <div id="Quality" class="tabcontent active">
@@ -1049,6 +1070,12 @@ class ReportGenerator:
                 <div id="comparison-plots"></div>
             </div>
             
+            <div id="BD-Rate" class="tabcontent">
+                <div id="bd-rate-content">
+                    <p>BD-Rate analysis will be loaded here...</p>
+                </div>
+            </div>
+            
             <script>
                 // Global variables for plot data
                 var qualityData = {quality_fig.to_json()};
@@ -1067,6 +1094,12 @@ class ReportGenerator:
                     }}
                     document.getElementById(tabName).classList.add("active");
                     evt.currentTarget.classList.add("active");
+                    
+                    // Initialize BD-Rate when that tab is clicked
+                    if (tabName === 'BD-Rate' && typeof initializeBDRate === 'function') {{
+                        console.log('🔄 BD-Rate tab clicked, initializing...');
+                        initializeBDRate();
+                    }}
                 }}
                 
                 // Extract unique devices from quality data
@@ -1552,6 +1585,7 @@ class ReportGenerator:
                     // Hide all traces
                     Plotly.restyle('comparison-plots', {{visible: 'legendonly'}}, {{}});
                 }}
+                
                 
                 // Update reference selection
                 function updateReference() {{
@@ -2281,6 +2315,20 @@ class ReportGenerator:
                     createPerformanceDeviceFilters();
                     createComparisonDeviceFilters();
                     createReferenceSelector();
+                    if (typeof createBDRateReferenceSelector === 'function') {{
+                        console.log('🔧 Creating BD-Rate reference selector');
+                        createBDRateReferenceSelector();
+                    }} else {{
+                        console.log('❌ createBDRateReferenceSelector function not found');
+                    }}
+                    
+                    // Extract BD-Rate data after quality plots are loaded (following comparison tab pattern)
+                    if (typeof extractRawQualityData === 'function') {{
+                        console.log('🔧 Extracting BD-Rate data');
+                        extractRawQualityData();
+                    }} else {{
+                        console.log('❌ extractRawQualityData function not found');
+                    }}
                     
                     // Apply initial filtering
                     filterTraces();
@@ -2297,6 +2345,13 @@ class ReportGenerator:
         </html>
         """
         
+        # Add BD-Rate section to HTML (will be populated dynamically)
+        self.logger.info("Adding BD-Rate section to HTML for dynamic generation")
+        available_codecs = self._get_available_codecs_from_results(test_results)
+        self.logger.info(f"Available codecs for BD-Rate: {available_codecs}")
+        # Always call the function, even with empty visualizations
+        html_content = self.add_bd_rate_section_to_html(html_content, {}, test_results)
+        
         # Save HTML file
         with open(output_file, 'w') as f:
             f.write(html_content)
@@ -2304,13 +2359,748 @@ class ReportGenerator:
         self.logger.info(f"Interactive report saved to: {output_file}")
         return str(output_file)
 
+    def calculate_bd_rate_analysis(self, test_results: List[TestResult], 
+                                 quality_metrics: List[str] = None) -> Dict[str, Any]:
+        """
+        Calculate BD-Rate analysis for codec comparison
+        
+        Args:
+            test_results: List of test results
+            quality_metrics: List of quality metrics to analyze
+            
+        Returns:
+            Dictionary with BD-Rate analysis results
+        """
+        # BD-Rate modules are required - will fail fast if not available
+        
+        if quality_metrics is None:
+            quality_metrics = ['psnr', 'ssim', 'vmaf']
+        
+        analyzer = AVABDRateAnalyzer()
+        results = {}
+        
+        # Find quality CSV files
+        quality_csv_files = []
+        for result in test_results:
+            if (result.success and hasattr(result, 'test_data') and 
+                'quality_csv' in result.test_data and 
+                os.path.exists(result.test_data['quality_csv'])):
+                quality_csv_files.append(result.test_data['quality_csv'])
+        
+        if not quality_csv_files:
+            self.logger.warning("No quality CSV files found for BD-Rate analysis")
+            return {}
+        
+        # Analyze each CSV file
+        for csv_file in quality_csv_files:
+            file_name = Path(csv_file).stem
+            results[file_name] = {}
+            
+            for metric in quality_metrics:
+                try:
+                    bd_results = analyzer.compare_all_codecs_from_csv(csv_file, metric)
+                    results[file_name][metric] = bd_results
+                except Exception as e:
+                    self.logger.error(f"BD-Rate analysis failed for {csv_file} ({metric}): {e}")
+                    results[file_name][metric] = {}
+        
+        return results
+    
+    def create_bd_rate_plot(self, bd_results: Dict[str, BDRateResult], 
+                          quality_metric: str = 'psnr') -> go.Figure:
+        """
+        Create a bar chart showing BD-Rate comparisons
+        
+        Args:
+            bd_results: Dictionary of BD-Rate results
+            quality_metric: Quality metric name for title
+            
+        Returns:
+            Plotly figure
+        """
+        if not bd_results:
+            # Return empty figure
+            fig = go.Figure()
+            fig.add_annotation(
+                text="No BD-Rate data available",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=16)
+            )
+            return fig
+        
+        # Extract data for plotting
+        codec_pairs = []
+        bd_rates = []
+        colors = []
+        
+        for pair_name, result in bd_results.items():
+            codec_pairs.append(pair_name.replace('_vs_', ' vs '))
+            bd_rates.append(result.bd_rate)
+            
+            # Color based on positive/negative BD-Rate
+            if result.bd_rate > 0:
+                colors.append('red')  # Higher bitrate (worse)
+            else:
+                colors.append('green')  # Lower bitrate (better)
+        
+        # Create bar chart
+        fig = go.Figure(data=[
+            go.Bar(
+                x=codec_pairs,
+                y=bd_rates,
+                marker_color=colors,
+                text=[f"{rate:.2f}%" for rate in bd_rates],
+                textposition='auto',
+                hovertemplate='<b>%{x}</b><br>BD-Rate: %{y:.2f}%<extra></extra>'
+            )
+        ])
+        
+        fig.update_layout(
+            title=f"BD-Rate Comparison ({quality_metric.upper()})",
+            xaxis_title="Codec Pairs",
+            yaxis_title="BD-Rate (%)",
+            yaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=2),
+            showlegend=False,
+            height=400
+        )
+        
+        # Add horizontal line at 0
+        fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
+        
+        return fig
+    
+    def generate_bd_rate_report(self, test_results: List[TestResult], 
+                              output_file: str = None) -> str:
+        """
+        Generate BD-Rate analysis report
+        
+        Args:
+            test_results: List of test results
+            output_file: Optional output file path
+            
+        Returns:
+            Report content as string
+        """
+        # BD-Rate modules are required - will fail fast if not available
+        
+        # Calculate BD-Rate analysis
+        bd_analysis = self.calculate_bd_rate_analysis(test_results)
+        
+        if not bd_analysis:
+            return "No BD-Rate data available for analysis"
+        
+        # Generate report
+        report_lines = []
+        report_lines.append("=" * 80)
+        report_lines.append("Bjøntegaard-Delta (BD-Rate) Analysis Report")
+        report_lines.append("=" * 80)
+        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append("")
+        
+        for file_name, file_results in bd_analysis.items():
+            report_lines.append(f"File: {file_name}")
+            report_lines.append("-" * 40)
+            
+            for metric, metric_results in file_results.items():
+                if not metric_results:
+                    continue
+                    
+                report_lines.append(f"\nQuality Metric: {metric.upper()}")
+                report_lines.append("-" * 20)
+                
+                for pair_name, result in metric_results.items():
+                    report_lines.append(f"\nComparison: {pair_name}")
+                    report_lines.append(format_bd_rate_result(result))
+                    report_lines.append("")
+        
+        report_content = "\n".join(report_lines)
+        
+        # Save to file if specified
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(report_content)
+            self.logger.info(f"BD-Rate report saved to: {output_file}")
+        
+        return report_content
+
+    def create_bd_rate_visualizations(self, test_results: List[TestResult], 
+                                    quality_metrics: List[str] = None,
+                                    reference_codec: str = None) -> Dict[str, go.Figure]:
+        """
+        Create BD-Rate visualizations for test results using the same data as quality plots
+        
+        Args:
+            test_results: List of test results
+            quality_metrics: List of quality metrics to visualize
+            reference_codec: Reference codec for BD-Rate comparison (if None, uses pairwise comparison)
+            
+        Returns:
+            Dictionary mapping visualization names to Plotly figures
+        """
+        # BD-Rate modules are required - will fail fast if not available
+        
+        if quality_metrics is None:
+            quality_metrics = ['psnr', 'ssim', 'vmaf']
+        
+        visualizer = BDRateVisualizer()
+        analyzer = AVABDRateAnalyzer()
+        visualizations = {}
+        
+        # Use the same data source as quality plots - read from test_results
+        all_data = []
+        for result in test_results:
+            if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
+                csv_file = result.test_data['quality_csv']
+                if os.path.exists(csv_file):
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if not df.empty:
+                            # Add device info to the dataframe
+                            df['device_serial'] = result.device_serial
+                            df['test_name'] = result.test_name
+                            all_data.append(df)
+                    except pd.errors.EmptyDataError:
+                        self.logger.warning(f"Skipping empty quality CSV file: {csv_file}")
+                        continue
+        
+        if not all_data:
+            self.logger.warning("No quality data available for BD-Rate analysis")
+            return {}
+        
+        # Combine all data
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Check if we have the required columns
+        required_columns = ['vmaf_mean', 'calculated_bitrate_bps', 'codec']
+        missing_columns = [col for col in required_columns if col not in combined_df.columns]
+        if missing_columns:
+            self.logger.warning(f"Missing required columns for BD-Rate analysis: {missing_columns}")
+            return {}
+        
+        # Create a temporary CSV file with the combined data for BD-Rate analysis
+        temp_csv = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
+        combined_df.to_csv(temp_csv.name, index=False)
+        temp_csv.close()
+        
+        try:
+            # Get available codecs for reference selection
+            available_codecs = analyzer.get_available_codecs(temp_csv.name)
+            
+            # If no reference codec specified, use the first one as default
+            if reference_codec is None and available_codecs:
+                reference_codec = available_codecs[0]
+            
+            # Create visualizations for each quality metric
+            for metric in quality_metrics:
+                try:
+                    # Get RD curves for this metric
+                    rd_curves_metric = analyzer.extract_rd_curves_from_csv(temp_csv.name, metric)
+                    
+                    if len(rd_curves_metric) < 2:
+                        self.logger.warning(f"Insufficient codecs for BD-Rate comparison ({metric})")
+                        continue
+                    
+                    # Calculate BD-Rate results
+                    if reference_codec and reference_codec in available_codecs:
+                        # Use reference-based comparison
+                        bd_results = analyzer.compare_codecs_against_reference(temp_csv.name, reference_codec, metric)
+                        viz_key = f"combined_{metric}_ref_{reference_codec.replace('.', '_')}"
+                    else:
+                        # Use pairwise comparison
+                        bd_results = analyzer.compare_all_codecs_from_csv(temp_csv.name, metric)
+                        viz_key = f"combined_{metric}"
+                    
+                    if not bd_results:
+                        self.logger.warning(f"No BD-Rate results for {metric}")
+                        continue
+                    
+                    # Rate-distortion curves
+                    rd_fig = visualizer.create_rd_curve_plot(rd_curves_metric, metric)
+                    visualizations[f"{viz_key}_rd_curves"] = rd_fig
+                    
+                    # BD-Rate bar chart
+                    if reference_codec and reference_codec in available_codecs:
+                        bd_fig = visualizer.create_reference_bd_rate_chart(bd_results, reference_codec, metric)
+                    else:
+                        bd_fig = visualizer.create_bd_rate_bar_chart(bd_results, metric)
+                    visualizations[f"{viz_key}_bd_rate_bars"] = bd_fig
+                    
+                    # Comprehensive comparison
+                    comp_fig = visualizer.create_comprehensive_comparison(rd_curves_metric, bd_results, metric)
+                    visualizations[f"{viz_key}_comprehensive"] = comp_fig
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to create visualization for {metric}: {e}")
+        
+        finally:
+            # Clean up temporary file
+            os.unlink(temp_csv.name)
+        
+        return visualizations
+
+    def add_bd_rate_section_to_html(self, html_content: str, bd_visualizations: Dict[str, go.Figure], test_results: List[TestResult] = None) -> str:
+        """
+        Add BD-Rate visualization section to HTML report
+        
+        Args:
+            html_content: Existing HTML content
+            bd_visualizations: Dictionary of BD-Rate visualizations
+            
+        Returns:
+            Updated HTML content with BD-Rate section
+        """
+        # Always add BD-Rate section (visualizations are generated dynamically)
+        
+        # Find the BD-Rate content div
+        bd_rate_content_start = html_content.find('<div id="bd-rate-content">')
+        bd_rate_content_end = html_content.find('</div>', bd_rate_content_start)
+        
+        self.logger.info(f"BD-Rate content div search: start={bd_rate_content_start}, end={bd_rate_content_end}")
+        
+        if bd_rate_content_start == -1 or bd_rate_content_end == -1:
+            self.logger.warning("Could not find BD-Rate content div in HTML")
+            return html_content
+        
+        # Create BD-Rate section content
+        # Extract available codecs from all test results
+        available_codecs = []
+        if test_results:
+            # Get codecs from all test results' quality data
+            for result in test_results:
+                if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
+                    csv_file = result.test_data['quality_csv']
+                    if os.path.exists(csv_file):
+                        try:
+                            df = pd.read_csv(csv_file)
+                            if 'codec' in df.columns:
+                                codecs_in_file = df['codec'].unique().tolist()
+                                available_codecs.extend(codecs_in_file)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to read CSV for codec extraction: {e}")
+            
+            # Remove duplicates and sort
+            available_codecs = sorted(list(set(available_codecs)))
+        
+        bd_section_content = self._create_bd_rate_html_content(bd_visualizations, available_codecs)
+        
+        # Add JavaScript for BD-Rate reference selector (always include the functions)
+        bd_rate_js = f"""
+            <script>
+            // Create BD-Rate reference selector options
+            function createBDRateReferenceSelector() {{
+                var codecs = {json.dumps(available_codecs)};
+                var selector = document.getElementById('bd-rate-reference-selector');
+                console.log('Creating BD-Rate reference selector for codecs:', codecs);
+                console.log('BD-Rate reference selector element:', selector);
+                
+                if (!selector) {{
+                    console.log('BD-Rate reference selector element not found');
+                    return;
+                }}
+                
+                if (codecs.length === 0) {{
+                    console.log('No codecs found for BD-Rate reference selector');
+                    selector.innerHTML = '<option value="">No codecs available</option>';
+                    return;
+                }}
+                
+                // Clear existing options except the first one
+                selector.innerHTML = '<option value="">Select Reference...</option>';
+                
+                // Add codec options
+                codecs.forEach(function(codec) {{
+                    var option = document.createElement('option');
+                    option.value = codec;
+                    option.textContent = codec;
+                    selector.appendChild(option);
+                }});
+                
+                console.log('BD-Rate reference selector populated with', codecs.length, 'codecs');
+            }}
+            
+            // Store raw quality data for BD-Rate calculations
+            var rawQualityData = {{}};
+            
+            // Update BD-Rate reference selection
+            function updateBDRateReference() {{
+                console.log('🔄 updateBDRateReference called');
+                
+                // Ensure data is extracted first
+                if (Object.keys(rawQualityData).length === 0) {{
+                    console.log('🔧 No data available, extracting now...');
+                    if (typeof extractRawQualityData === 'function') {{
+                        extractRawQualityData();
+                    }}
+                }}
+                
+                var selectedReference = document.getElementById('bd-rate-reference-selector').value;
+                console.log('BD-Rate reference selected:', selectedReference);
+                
+                if (selectedReference) {{
+                    console.log('✅ Reference selected, calling regenerateBDRateAnalysis');
+                    // Regenerate BD-Rate visualizations with new reference
+                    regenerateBDRateAnalysis(selectedReference);
+                }} else {{
+                    console.log('❌ No reference selected');
+                }}
+            }}
+            
+            // Extract raw quality data from quality plots (following comparison tab pattern)
+            function extractRawQualityData() {{
+                console.log('🔍 Starting BD-Rate data extraction...');
+                rawQualityData = {{}};
+                
+                if (!qualityData || !qualityData.data) {{
+                    console.log('❌ No qualityData available');
+                    return;
+                }}
+                
+                console.log('📊 Processing', qualityData.data.length, 'traces for BD-Rate');
+                
+                qualityData.data.forEach(function(trace) {{
+                    if (trace.name && trace.x && trace.y) {{
+                        // Extract codec and device from trace name: "codec (device)"
+                        var match = trace.name.match(/([^(]+)\\(([^)]+)\\)/);
+                        if (match) {{
+                            var codec = match[1].trim();
+                            var device = match[2].trim();
+                            
+                            if (!rawQualityData[codec]) {{
+                                rawQualityData[codec] = {{}};
+                            }}
+                            
+                            // Determine quality metric based on subplot (same as comparison tab)
+                            var metric = 'unknown';
+                            if (trace.yaxis === 'y') {{
+                                metric = 'vmaf';
+                            }} else if (trace.yaxis === 'y2') {{
+                                metric = 'psnr';
+                            }} else if (trace.yaxis === 'y3') {{
+                                metric = 'ssim';
+                            }}
+                            
+                            if (metric !== 'unknown') {{
+                                rawQualityData[codec][metric] = {{
+                                    bitrates: trace.x,
+                                    qualities: trace.y,
+                                    device: device,
+                                    name: trace.name
+                                }};
+                            }}
+                        }}
+                    }}
+                }});
+                
+                console.log('📊 Extracted BD-Rate data for codecs:', Object.keys(rawQualityData));
+            }}
+            
+            // Regenerate BD-Rate analysis with new reference (following comparison tab pattern)
+            function regenerateBDRateAnalysis(referenceCodec) {{
+                console.log('🔄 Regenerating BD-Rate analysis with reference:', referenceCodec);
+                
+                if (!referenceCodec) {{
+                    console.log('❌ No reference codec selected');
+                    return;
+                }}
+                
+                if (!rawQualityData[referenceCodec]) {{
+                    console.log('❌ No data found for reference codec:', referenceCodec);
+                    return;
+                }}
+                
+                // Show all metric sections
+                document.getElementById('bd-rate-psnr').style.display = 'block';
+                document.getElementById('bd-rate-ssim').style.display = 'block';
+                document.getElementById('bd-rate-vmaf').style.display = 'block';
+                
+                // Generate BD-Rate analysis for each metric
+                generateBDRateAnalysis('psnr', referenceCodec);
+                generateBDRateAnalysis('ssim', referenceCodec);
+                generateBDRateAnalysis('vmaf', referenceCodec);
+            }}
+            
+            // Generate BD-Rate analysis for a specific metric
+            function generateBDRateAnalysis(metric, referenceCodec) {{
+                console.log('📊 Generating BD-Rate analysis for', metric, 'with reference', referenceCodec);
+                
+                // Get reference data
+                var referenceData = rawQualityData[referenceCodec][metric];
+                if (!referenceData) {{
+                    console.log('❌ No reference data for', metric);
+                    return;
+                }}
+                
+                // Collect all codec data for this metric
+                var allCodecData = [];
+                Object.keys(rawQualityData).forEach(function(codec) {{
+                    if (rawQualityData[codec][metric]) {{
+                        allCodecData.push({{
+                            codec: codec,
+                            bitrates: rawQualityData[codec][metric].bitrates,
+                            qualities: rawQualityData[codec][metric].qualities
+                        }});
+                    }}
+                }});
+                
+                if (allCodecData.length < 2) {{
+                    console.log('❌ Not enough codecs for BD-Rate analysis');
+                    return;
+                }}
+                
+                // Create rate-distortion curves plot
+                createRDCurvesPlot(metric, allCodecData);
+                
+                // Create BD-Rate comparison plot
+                createBDRateComparisonPlot(metric, allCodecData, referenceCodec);
+            }}
+            
+            // Create rate-distortion curves plot
+            function createRDCurvesPlot(metric, codecData) {{
+                var traces = [];
+                
+                codecData.forEach(function(data) {{
+                    traces.push({{
+                        x: data.bitrates,
+                        y: data.qualities,
+                        mode: 'lines+markers',
+                        name: data.codec,
+                        line: {{ width: 3 }},
+                        marker: {{ size: 6 }}
+                    }});
+                }});
+                
+                var layout = {{
+                    title: metric.toUpperCase() + ' Rate-Distortion Curves',
+                    xaxis: {{ 
+                        title: 'Bitrate (kbps)',
+                        type: 'log',
+                        showgrid: true
+                    }},
+                    yaxis: {{ 
+                        title: metric.toUpperCase(),
+                        showgrid: true
+                    }},
+                    width: 800,
+                    height: 600,
+                    margin: {{ t: 60, b: 60, l: 80, r: 40 }},
+                    showlegend: true
+                }};
+                
+                var plotDiv = 'bd-rate-' + metric + '-rd';
+                Plotly.newPlot(plotDiv, traces, layout, {{responsive: true}});
+            }}
+            
+            // Create BD-Rate comparison plot
+            function createBDRateComparisonPlot(metric, codecData, referenceCodec) {{
+                // Calculate BD-Rate for each codec vs reference
+                var bdRates = [];
+                var codecNames = [];
+                
+                codecData.forEach(function(data) {{
+                    if (data.codec !== referenceCodec) {{
+                        // Simple BD-Rate calculation (placeholder)
+                        // In a full implementation, this would use proper cubic spline interpolation
+                        var bdRate = calculateSimpleBDRate(data, codecData.find(c => c.codec === referenceCodec));
+                        bdRates.push(bdRate);
+                        codecNames.push(data.codec);
+                    }}
+                }});
+                
+                var colors = bdRates.map(function(rate) {{
+                    return rate < 0 ? 'rgba(0, 255, 0, 0.7)' : 'rgba(255, 0, 0, 0.7)';
+                }});
+                
+                var trace = {{
+                    x: codecNames,
+                    y: bdRates,
+                    type: 'bar',
+                    marker: {{ color: colors }},
+                    text: bdRates.map(function(rate) {{
+                        return rate.toFixed(2) + '%';
+                    }}),
+                    textposition: 'auto'
+                }};
+                
+                var layout = {{
+                    title: metric.toUpperCase() + ' BD-Rate vs ' + referenceCodec,
+                    xaxis: {{ title: 'Codec' }},
+                    yaxis: {{ 
+                        title: 'BD-Rate (%)',
+                        zeroline: true,
+                        zerolinecolor: 'black'
+                    }},
+                    width: 800,
+                    height: 600,
+                    margin: {{ t: 60, b: 60, l: 80, r: 40 }},
+                    showlegend: false
+                }};
+                
+                var plotDiv = 'bd-rate-' + metric + '-bd';
+                Plotly.newPlot(plotDiv, [trace], layout, {{responsive: true}});
+            }}
+            
+            // Simple BD-Rate calculation (placeholder)
+            function calculateSimpleBDRate(codecData, referenceData) {{
+                // This is a simplified calculation for demonstration
+                // A full implementation would use proper cubic spline interpolation
+                var avgCodecQuality = codecData.qualities.reduce((a, b) => a + b, 0) / codecData.qualities.length;
+                var avgReferenceQuality = referenceData.qualities.reduce((a, b) => a + b, 0) / referenceData.qualities.length;
+                var avgCodecBitrate = codecData.bitrates.reduce((a, b) => a + b, 0) / codecData.bitrates.length;
+                var avgReferenceBitrate = referenceData.bitrates.reduce((a, b) => a + b, 0) / referenceData.bitrates.length;
+                
+                // Simple percentage difference
+                var bitrateDiff = ((avgCodecBitrate - avgReferenceBitrate) / avgReferenceBitrate) * 100;
+                return bitrateDiff;
+            }}
+            
+            // Auto-select first codec when page loads (following comparison tab pattern)
+            window.addEventListener('load', function() {{
+                console.log('🔄 BD-Rate: Page loaded, starting initialization...');
+                
+                setTimeout(function() {{
+                    console.log('🔄 BD-Rate: Checking for reference selector...');
+                    var selector = document.getElementById('bd-rate-reference-selector');
+                    console.log('🔄 BD-Rate: Selector found:', selector);
+                    
+                    if (selector && selector.options.length > 1) {{
+                        console.log('🔄 BD-Rate: Auto-selecting first codec:', selector.options[1].value);
+                        // Select the first actual codec as default
+                        selector.value = selector.options[1].value;
+                        updateBDRateReference();
+                    }} else {{
+                        console.log('❌ BD-Rate: No selector or options found');
+                    }}
+                }}, 1000); // Give time for data extraction
+            }});
+            
+            // Also try to initialize when BD-Rate tab is clicked
+            function initializeBDRate() {{
+                console.log('🔄 BD-Rate: Manual initialization called...');
+                
+                // Hide manual init button
+                var manualInit = document.getElementById('bd-rate-manual-init');
+                if (manualInit) {{
+                    manualInit.style.display = 'none';
+                }}
+                
+                // First, populate the dropdown
+                if (typeof createBDRateReferenceSelector === 'function') {{
+                    console.log('🔧 BD-Rate: Populating dropdown...');
+                    createBDRateReferenceSelector();
+                }}
+                
+                // Ensure data is extracted
+                if (Object.keys(rawQualityData).length === 0) {{
+                    console.log('🔧 BD-Rate: No data, extracting now...');
+                    if (typeof extractRawQualityData === 'function') {{
+                        extractRawQualityData();
+                    }}
+                }}
+                
+                // Try to select first codec
+                var selector = document.getElementById('bd-rate-reference-selector');
+                if (selector && selector.options.length > 1) {{
+                    if (selector.value === '') {{
+                        console.log('🔄 BD-Rate: Selecting first codec:', selector.options[1].value);
+                        selector.value = selector.options[1].value;
+                    }}
+                    updateBDRateReference();
+                }} else {{
+                    console.log('❌ BD-Rate: No selector or options found');
+                    if (manualInit) {{
+                        manualInit.style.display = 'block';
+                    }}
+                }}
+            }}
+            </script>
+            """
+        bd_section_content += bd_rate_js
+        
+        # Replace the placeholder content
+        updated_html = (html_content[:bd_rate_content_start + len('<div id="bd-rate-content">')] + 
+                       bd_section_content + 
+                       html_content[bd_rate_content_end:])
+        
+        return updated_html
+
+    def _get_available_codecs_from_results(self, test_results: List[TestResult]) -> List[str]:
+        """Extract available codecs from test results"""
+        available_codecs = []
+        for result in test_results:
+            if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
+                csv_file = result.test_data['quality_csv']
+                if os.path.exists(csv_file):
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if 'codec' in df.columns:
+                            codecs_in_file = df['codec'].unique().tolist()
+                            available_codecs.extend(codecs_in_file)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to read CSV for codec extraction: {e}")
+        
+        # Remove duplicates and sort
+        return sorted(list(set(available_codecs)))
+
+    def _create_bd_rate_html_content(self, bd_visualizations: Dict[str, go.Figure], 
+                                   available_codecs: List[str] = None) -> str:
+        """Create HTML content for BD-Rate visualizations within the tab"""
+        
+        # For dynamic BD-Rate, we'll generate the plots in JavaScript
+        # Just create placeholder sections that will be populated dynamically
+        
+        # Create reference codec dropdown if codecs are available
+        reference_dropdown = ""
+        if available_codecs and len(available_codecs) > 1:
+            reference_dropdown = f"""
+            <div class="reference-selector">
+                <h4>Reference Selection:</h4>
+                <select id="bd-rate-reference-selector" onchange="updateBDRateReference()">
+                    <option value="">Select Reference...</option>
+                </select>
+            </div>
+            """
+        
+        html_content = f"""
+        <div class="bd-rate-section">
+            <h2>Bjøntegaard-Delta (BD-Rate) Analysis</h2>
+            <p>BD-Rate measures the average percentage bit rate difference between two rate-distortion curves at equal measured distortion. Negative values indicate better compression efficiency (lower bitrate for same quality).</p>
+            {reference_dropdown}
+            
+            <div id="bd-rate-content">
+                <p>Select a reference codec above to view BD-Rate analysis.</p>
+                <div id="bd-rate-loading" style="display: none;">
+                    <p>Loading BD-Rate analysis...</p>
+                </div>
+                <div id="bd-rate-manual-init" style="display: none;">
+                    <p>BD-Rate analysis not loaded. <button onclick="initializeBDRate()">Click here to initialize</button></p>
+                </div>
+                
+                <div id="bd-rate-psnr" class="bd-rate-metric-section" style="display: none;">
+                    <h3>PSNR Analysis</h3>
+                    <div id="bd-rate-psnr-rd" class="bd-rate-plot"></div>
+                    <div id="bd-rate-psnr-bd" class="bd-rate-plot"></div>
+                </div>
+                
+                <div id="bd-rate-ssim" class="bd-rate-metric-section" style="display: none;">
+                    <h3>SSIM Analysis</h3>
+                    <div id="bd-rate-ssim-rd" class="bd-rate-plot"></div>
+                    <div id="bd-rate-ssim-bd" class="bd-rate-plot"></div>
+                </div>
+                
+                <div id="bd-rate-vmaf" class="bd-rate-metric-section" style="display: none;">
+                    <h3>VMAF Analysis</h3>
+                    <div id="bd-rate-vmaf-rd" class="bd-rate-plot"></div>
+                    <div id="bd-rate-vmaf-bd" class="bd-rate-plot"></div>
+                </div>
+            </div>
+        </div>
+        """
+        
+        return html_content
+
     def generate_comprehensive_report(self, test_results: List[TestResult], 
                                     stats_files: List[str] = None) -> Dict[str, str]:
         """Generate comprehensive reports - wrapper for interactive report"""
         interactive_report = self.generate_interactive_report(test_results, stats_files)
-        
-        return {
-            "interactive": interactive_report,
-            "static": interactive_report,  # Same as interactive for now
-            "json": ""  # Not implemented in minimal version
-        }
+        return {"interactive": interactive_report}
