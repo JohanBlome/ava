@@ -92,18 +92,41 @@ class ReportGenerator:
             if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
                 csv_file = result.test_data['quality_csv']
                 if os.path.exists(csv_file):
-                    df = pd.read_csv(csv_file)
-                    if not df.empty:
-                        # Add device info to the dataframe
-                        df['device_serial'] = result.device_serial
-                        df['test_name'] = result.test_name
-                        all_data.append(df)
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if not df.empty:
+                            # Add device info to the dataframe
+                            df['device_serial'] = result.device_serial
+                            df['test_name'] = result.test_name
+                            all_data.append(df)
+                    except pd.errors.EmptyDataError:
+                        # Skip empty CSV files (e.g., when quality analysis fails)
+                        print(f"Warning: Skipping empty quality CSV file: {csv_file}")
+                        continue
         
         if not all_data:
+            # Add a message when no quality data is available
+            fig.add_annotation(
+                text="No quality data available. Quality analysis requires valid encoded video files.",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=16, color="red")
+            )
             return fig
             
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Check if we have quality data columns
+        if 'vmaf_mean' not in combined_df.columns or 'calculated_bitrate_bps' not in combined_df.columns:
+            # Add a message when no quality data is available
+            fig.add_annotation(
+                text="No quality data available. Quality analysis requires valid encoded video files.",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=16, color="red")
+            )
+            return fig
         
         # VMAF plot - use calculated_bitrate_bps for X-axis
         if 'vmaf_mean' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
@@ -119,19 +142,19 @@ class ReportGenerator:
                     line_style = self._get_codec_line_style(codec_type)
                     trace_name = self._get_trace_name(codec, model)
                     
-                    fig.add_trace(
-                        go.Scatter(
+                fig.add_trace(
+                    go.Scatter(
                             x=(device_data['calculated_bitrate_bps'] / 1000).tolist(),  # Convert to kbps
                             y=device_data['vmaf_mean'].tolist(),
-                            mode='markers+lines',
+                        mode='markers+lines',
                             name=trace_name,
                             line=dict(color=color, dash=line_style, width=2),
                             marker=dict(size=6),
                             legendgroup=trace_name,
                             showlegend=True
-                        ),
-                        row=1, col=1
-                    )
+                    ),
+                    row=1, col=1
+                )
         
         # PSNR plot - use calculated_bitrate_bps for X-axis
         if 'psnr' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
@@ -319,6 +342,39 @@ class ReportGenerator:
     def _get_trace_name(self, codec: str, device: str) -> str:
         """Get consistent trace name for filtering"""
         return f"{codec} ({device})"
+    
+    def _calculate_frame_statistics(self, device_data: pd.DataFrame, metric_column: str) -> tuple:
+        """Calculate frame-based statistics with confidence intervals"""
+        # Group by frame and calculate statistics
+        frame_stats = device_data.groupby('frame').agg({
+            metric_column: ['mean', 'std', 'count']
+        }).reset_index()
+        
+        # Flatten column names
+        frame_stats.columns = ['frame', 'mean_value', 'std_value', 'count']
+        
+        # Convert frame numbers to time (proper 1-second timeline)
+        fps = device_data['fps'].iloc[0] if 'fps' in device_data.columns else 30
+        time_sec = (frame_stats['frame'] / fps).values
+        mean_values = frame_stats['mean_value'].values
+        std_values = frame_stats['std_value'].values
+        count = frame_stats['count'].values
+        
+        # Handle NaN standard deviations (when only one data point per frame)
+        # For single data points, use a small percentage of the mean as std
+        std_values = np.where(np.isnan(std_values), mean_values * 0.05, std_values)
+        
+        # Calculate confidence interval (95% CI)
+        # Use t-distribution for small samples, normal for large samples
+        confidence_factor = 1.96  # 95% CI for normal distribution
+        upper_bound = mean_values + confidence_factor * std_values
+        lower_bound = mean_values - confidence_factor * std_values
+        
+        # Ensure lower bound is never negative for bitrate
+        if 'bitrate' in metric_column.lower():
+            lower_bound = np.maximum(lower_bound, 0)
+        
+        return time_sec, mean_values, upper_bound, lower_bound, count
 
     def create_performance_plots(self, test_results: List[TestResult]) -> go.Figure:
         """Create performance plots from encoder statistics CSV files"""
@@ -326,8 +382,8 @@ class ReportGenerator:
         # Create subplots for performance metrics
         fig = make_subplots(
             rows=2, cols=2,
-            subplot_titles=("Encoding Latency (Aggregated)", "Processing Framerate (Aggregated)", 
-                          "Pipeline Depth Over Time", "Bitrate Variability"),
+            subplot_titles=("Encoding Latency (Frame-based)", "Processing Framerate (Frame-based)", 
+                          "Pipeline Depth Over Time", "Bitrate (5-frame Moving Average)"),
             specs=[[{"secondary_y": False}, {"secondary_y": False}],
                    [{"secondary_y": False}, {"secondary_y": False}]]
         )
@@ -340,12 +396,17 @@ class ReportGenerator:
                 if isinstance(csv_files, list):
                     for csv_file in csv_files:
                         if csv_file.endswith('_encoding_data.csv') and os.path.exists(csv_file):
-                            df = pd.read_csv(csv_file)
-                            if not df.empty:
-                                # Add device info to the dataframe
-                                df['device_serial'] = result.device_serial
-                                df['test_name'] = result.test_name
-                                all_data.append(df)
+                            try:
+                                df = pd.read_csv(csv_file)
+                                if not df.empty:
+                                    # Add device info to the dataframe
+                                    df['device_serial'] = result.device_serial
+                                    df['test_name'] = result.test_name
+                                    all_data.append(df)
+                            except pd.errors.EmptyDataError:
+                                # Skip empty CSV files
+                                print(f"Warning: Skipping empty performance CSV file: {csv_file}")
+                                continue
         
         if not all_data:
             # If no encoder stats, create placeholder plots
@@ -361,38 +422,19 @@ class ReportGenerator:
         combined_df = pd.concat(all_data, ignore_index=True)
         
         # Plot 1: Aggregated Encoding Latency
-        if 'proctime' in combined_df.columns and 'rel_pts' in combined_df.columns:
+        if 'proctime' in combined_df.columns and 'frame' in combined_df.columns:
             for codec in combined_df['codec'].unique():
                 codec_data = combined_df[combined_df['codec'] == codec]
                 for device in codec_data['device_serial'].unique():
                     device_data = codec_data[codec_data['device_serial'] == device]
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                     
-                    # Convert nanoseconds to milliseconds
-                    latency_ms = (device_data['proctime'] / 1_000_000).values
-                    time_sec = (device_data['rel_pts'] / 1000).values
+                    # Convert nanoseconds to milliseconds first, then calculate frame statistics
+                    device_data_copy = device_data.copy()
+                    device_data_copy['proctime_ms'] = device_data_copy['proctime'] / 1_000_000
                     
-                    # Sort by time for proper aggregation
-                    sort_idx = np.argsort(time_sec)
-                    time_sec = time_sec[sort_idx]
-                    latency_ms = latency_ms[sort_idx]
-                    
-                    # Calculate statistics
-                    mean_latency = np.mean(latency_ms)
-                    p50 = np.percentile(latency_ms, 50)
-                    p95 = np.percentile(latency_ms, 95)
-                    p99 = np.percentile(latency_ms, 99)
-                    
-                    # Create rolling statistics for smooth curves
-                    window_size = min(50, len(latency_ms) // 10) if len(latency_ms) > 10 else 5
-                    rolling_mean = pd.Series(latency_ms).rolling(window=window_size, center=True).mean()
-                    rolling_std = pd.Series(latency_ms).rolling(window=window_size, center=True).std()
-                    
-                    # Remove NaN values
-                    valid_idx = ~np.isnan(rolling_mean)
-                    time_valid = time_sec[valid_idx]
-                    mean_valid = rolling_mean[valid_idx]
-                    std_valid = rolling_std[valid_idx]
+                    # Calculate frame-based statistics
+                    time_sec, mean_latency, upper_bound, lower_bound, count = self._calculate_frame_statistics(device_data_copy, 'proctime_ms')
                     
                     # Create consistent trace naming for filtering
                     trace_name = self._get_trace_name(codec, model)
@@ -405,11 +447,12 @@ class ReportGenerator:
                     # Add main line
                     fig.add_trace(
                         go.Scatter(
-                            x=time_valid.tolist(),
-                            y=mean_valid.tolist(),
-                            mode='lines',
+                            x=time_sec.tolist(),
+                            y=mean_latency.tolist(),
+                            mode='lines+markers',
                             name=trace_name,
                             line=dict(width=2, color=color, dash=line_style),
+                            marker=dict(color=color, size=4),
                             legendgroup=trace_name,
                             showlegend=True
                         ),
@@ -419,23 +462,23 @@ class ReportGenerator:
                     # Add confidence interval (upper bound)
                     fig.add_trace(
                         go.Scatter(
-                            x=time_valid.tolist(),
-                            y=(mean_valid + std_valid).tolist(),
+                            x=time_sec.tolist(),
+                            y=upper_bound.tolist(),
                             mode='lines',
                             line=dict(width=0),
                             showlegend=False,
                             hoverinfo='skip',
                             legendgroup=trace_name,
                             visible='legendonly'
-                        ),
-                        row=1, col=1
-                    )
+                    ),
+                    row=1, col=1
+                )
         
                     # Add confidence interval (lower bound with fill)
-                    fig.add_trace(
-                        go.Scatter(
-                            x=time_valid.tolist(),
-                            y=(mean_valid - std_valid).tolist(),
+                fig.add_trace(
+                    go.Scatter(
+                            x=time_sec.tolist(),
+                            y=lower_bound.tolist(),
                             mode='lines',
                             line=dict(width=0),
                             fill='tonexty',
@@ -449,37 +492,15 @@ class ReportGenerator:
                     )
         
         # Plot 2: Processing Framerate
-        if 'proc_fps' in combined_df.columns and 'rel_pts' in combined_df.columns:
+        if 'proc_fps' in combined_df.columns and 'frame' in combined_df.columns:
             for codec in combined_df['codec'].unique():
                 codec_data = combined_df[combined_df['codec'] == codec]
                 for device in codec_data['device_serial'].unique():
                     device_data = codec_data[codec_data['device_serial'] == device]
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                     
-                    fps = device_data['proc_fps'].values
-                    time_sec = (device_data['rel_pts'] / 1000).values
-                    
-                    # Sort by time for proper aggregation
-                    sort_idx = np.argsort(time_sec)
-                    time_sec = time_sec[sort_idx]
-                    fps = fps[sort_idx]
-                    
-                    # Calculate statistics
-                    mean_fps = np.mean(fps)
-                    p50 = np.percentile(fps, 50)
-                    p95 = np.percentile(fps, 95)
-                    p99 = np.percentile(fps, 99)
-                    
-                    # Create rolling statistics for smooth curves
-                    window_size = min(50, len(fps) // 10) if len(fps) > 10 else 5
-                    rolling_mean = pd.Series(fps).rolling(window=window_size, center=True).mean()
-                    rolling_std = pd.Series(fps).rolling(window=window_size, center=True).std()
-                    
-                    # Remove NaN values
-                    valid_idx = ~np.isnan(rolling_mean)
-                    time_valid = time_sec[valid_idx]
-                    mean_valid = rolling_mean[valid_idx]
-                    std_valid = rolling_std[valid_idx]
+                    # Calculate frame-based statistics
+                    time_sec, mean_fps, upper_bound, lower_bound, count = self._calculate_frame_statistics(device_data, 'proc_fps')
                     
                     # Create consistent trace naming for filtering
                     trace_name = self._get_trace_name(codec, model)
@@ -492,13 +513,14 @@ class ReportGenerator:
                     # Add main line
                     fig.add_trace(
                         go.Scatter(
-                            x=time_valid.tolist(),
-                            y=mean_valid.tolist(),
-                            mode='lines',
+                            x=time_sec.tolist(),
+                            y=mean_fps.tolist(),
+                            mode='lines+markers',
                             name=trace_name,
                             line=dict(width=2, color=color, dash=line_style),
+                            marker=dict(color=color, size=4),
                             legendgroup=trace_name,
-                            showlegend=False
+                            showlegend=True
                         ),
                         row=1, col=2
                     )
@@ -506,8 +528,8 @@ class ReportGenerator:
                     # Add confidence interval (upper bound)
                     fig.add_trace(
                         go.Scatter(
-                            x=time_valid.tolist(),
-                            y=(mean_valid + std_valid).tolist(),
+                            x=time_sec.tolist(),
+                            y=upper_bound.tolist(),
                             mode='lines',
                             line=dict(width=0),
                             showlegend=False,
@@ -521,8 +543,8 @@ class ReportGenerator:
                     # Add confidence interval (lower bound with fill)
                     fig.add_trace(
                         go.Scatter(
-                            x=time_valid.tolist(),
-                            y=(mean_valid - std_valid).tolist(),
+                            x=time_sec.tolist(),
+                            y=lower_bound.tolist(),
                             mode='lines',
                             line=dict(width=0),
                             fill='tonexty',
@@ -559,7 +581,7 @@ class ReportGenerator:
                     color = self._get_device_color(model)
                     line_style = self._get_codec_line_style(codec_type)
         
-                    fig.add_trace(
+        fig.add_trace(
                         go.Scatter(
                             x=time_sec.tolist(),
                             y=inflight.tolist(),
@@ -568,46 +590,120 @@ class ReportGenerator:
                             line=dict(width=2, color=color, dash=line_style),
                             legendgroup=trace_name,
                             showlegend=False
-                        ),
-                        row=2, col=1
-                    )
+            ),
+            row=2, col=1
+        )
         
-        # Plot 4: Bitrate Variability
-        if 'bitrate_per_frame_bps' in combined_df.columns and 'rel_pts' in combined_df.columns:
-            for codec in combined_df['codec'].unique():
-                codec_data = combined_df[combined_df['codec'] == codec]
-                for device in codec_data['device_serial'].unique():
-                    device_data = codec_data[codec_data['device_serial'] == device]
-                    model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                    
-                    bitrate_kbps = (device_data['bitrate_per_frame_bps'] / 1000).values
-                    time_sec = (device_data['rel_pts'] / 1000).values
-                    
-                    # Sort by time for proper aggregation
-                    sort_idx = np.argsort(time_sec)
-                    time_sec = time_sec[sort_idx]
-                    bitrate_kbps = bitrate_kbps[sort_idx]
-                    
-                    # Create consistent trace name for filtering
-                    trace_name = self._get_trace_name(codec, model)
-                    codec_type = self._get_codec_type(codec)
-                    
-                    # Get consistent color and line style
-                    color = self._get_device_color(model)
-                    line_style = self._get_codec_line_style(codec_type)
-        
-                    fig.add_trace(
-                        go.Scatter(
-                            x=time_sec.tolist(),
-                            y=bitrate_kbps.tolist(),
-                            mode='lines',
-                            name=trace_name,
-                            line=dict(color=color, dash=line_style, width=2),
-                            legendgroup=trace_name,
-                            showlegend=False
-                        ),
-                        row=2, col=2
-                    )
+        # Plot 4: Bitrate Variability (separate by target bitrate)
+        if 'bitrate_per_frame_bps' in combined_df.columns and 'frame' in combined_df.columns:
+            # Group by target bitrate first
+            for target_bitrate in combined_df['bitrate'].unique():
+                target_data = combined_df[combined_df['bitrate'] == target_bitrate]
+                target_bitrate_kbps = target_bitrate / 1000
+                
+                print(f"DEBUG: Processing target bitrate: {target_bitrate_kbps:.0f} kbps")
+                
+                for codec in target_data['codec'].unique():
+                    codec_data = target_data[target_data['codec'] == codec]
+                    for device in codec_data['device_serial'].unique():
+                        device_data = codec_data[codec_data['device_serial'] == device]
+                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                        
+                        # Get fps
+                        fps = device_data['fps'].iloc[0] if 'fps' in device_data.columns else 30
+                        
+                        # Group by frame and calculate statistics across all videos
+                        frame_stats = device_data.groupby('frame').agg({
+                            'bitrate_per_frame_bps': ['mean', 'std', 'count']
+                        }).reset_index()
+                        
+                        # Flatten column names
+                        frame_stats.columns = ['frame', 'mean_bitrate', 'std_bitrate', 'count']
+                        
+                        # Apply 5-frame moving average to the mean bitrate
+                        bitrate_series = pd.Series(frame_stats['mean_bitrate'])
+                        moving_avg = bitrate_series.rolling(window=5, center=True, min_periods=1).mean()
+                        
+                        # Apply 5-frame moving average to the std as well
+                        std_series = pd.Series(frame_stats['std_bitrate'])
+                        moving_std = std_series.rolling(window=5, center=True, min_periods=1).mean()
+                        
+                        # Convert to time and kbps
+                        time_sec = (frame_stats['frame'] / fps).values
+                        bitrate_kbps = (moving_avg / 1000).values
+                        std_kbps = (moving_std / 1000).values
+                        
+                        # Calculate confidence interval
+                        confidence_factor = 1.96  # 95% CI
+                        upper_bound = bitrate_kbps + confidence_factor * std_kbps
+                        lower_bound = bitrate_kbps - confidence_factor * std_kbps
+                        
+                        # Line thickness based on target bitrate (higher bitrate = thicker line)
+                        line_width = max(2, min(12, 2 + target_bitrate_kbps / 500))  # 2-12 pixel width based on target bitrate
+                        
+                        print(f"DEBUG: {codec} on {model}: {len(device_data)} videos, line width: {line_width:.1f}")
+                        print(f"DEBUG: Bitrate range: {bitrate_kbps.min():.2f} to {bitrate_kbps.max():.2f} kbps")
+                        
+                        # Create simple trace name (device/codec only, no bitrate suffix)
+                        trace_name = f"{codec} ({model})"
+                        
+                        # Get consistent color (no line style variation)
+                        color = self._get_device_color(model)
+            
+                        # Only show legend for the first target bitrate of each device/codec combination
+                        show_legend = bool(target_bitrate == combined_df[combined_df['codec'] == codec]['bitrate'].min())
+            
+                        # Plot the averaged 5-frame moving average bitrate data
+                        fig.add_trace(
+                            go.Scatter(
+                                x=time_sec.tolist(),
+                                y=bitrate_kbps.tolist(),
+                                mode='lines',
+                                name=trace_name,
+                                line=dict(color=color, width=line_width),
+                                legendgroup=trace_name,
+                                showlegend=show_legend,
+                                connectgaps=False,
+                                hovertemplate=f'<b>{codec} ({model})</b><br>' +
+                                            f'Target: {target_bitrate_kbps:.0f} kbps<br>' +
+                                            'Time: %{x:.3f}s<br>' +
+                                            'Bitrate: %{y:.0f} kbps<br>' +
+                                            '<extra></extra>'
+                            ),
+                            row=2, col=2
+                        )
+                        
+                        # Add confidence interval (upper bound)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=time_sec.tolist(),
+                                y=upper_bound.tolist(),
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip',
+                                legendgroup=trace_name,
+                                visible='legendonly'
+                            ),
+                            row=2, col=2
+                        )
+                        
+                        # Add confidence interval (lower bound with fill)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=time_sec.tolist(),
+                                y=lower_bound.tolist(),
+                                mode='lines',
+                                line=dict(width=0),
+                                fill='tonexty',
+                                fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.2)',
+                                showlegend=False,
+                                hoverinfo='skip',
+                                legendgroup=trace_name,
+                                visible='legendonly'
+                            ),
+                            row=2, col=2
+                        )
         
         # Update layout
         fig.update_layout(
@@ -648,18 +744,34 @@ class ReportGenerator:
             if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
                 csv_file = result.test_data['quality_csv']
                 if os.path.exists(csv_file):
-                    df = pd.read_csv(csv_file)
-                    if not df.empty:
-                        # Add device info to the dataframe
-                        df['device_serial'] = result.device_serial
-                        df['test_name'] = result.test_name
-                        all_data.append(df)
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if not df.empty:
+                            # Add device info to the dataframe
+                            df['device_serial'] = result.device_serial
+                            df['test_name'] = result.test_name
+                            all_data.append(df)
+                    except pd.errors.EmptyDataError:
+                        # Skip empty CSV files (e.g., when quality analysis fails)
+                        print(f"Warning: Skipping empty quality CSV file: {csv_file}")
+                        continue
         
         if not all_data:
             return fig
         
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Check if we have quality data
+        if 'vmaf_mean' not in combined_df.columns or 'calculated_bitrate_bps' not in combined_df.columns:
+            # Add a message when no quality data is available
+            fig.add_annotation(
+                text="No quality data available. Quality analysis requires valid encoded video files.",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=16, color="red")
+            )
+            return fig
         
         # VMAF Delta Comparison
         if 'vmaf_mean' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
@@ -715,7 +827,7 @@ class ReportGenerator:
                             codec_type = self._get_codec_type(codec)
                             line_style = self._get_codec_line_style(codec_type)
                             trace_name = self._get_trace_name(codec, model)
-                            
+        
                             fig.add_trace(
                                 go.Scatter(
                                     x=(bitrates / 1000).tolist(),
@@ -746,12 +858,12 @@ class ReportGenerator:
                         color = self._get_device_color(model)
                         codec_type = self._get_codec_type(codec)
                         trace_name = self._get_trace_name(codec, model)
-                        
-                        fig.add_trace(
-                            go.Scatter(
+        
+        fig.add_trace(
+            go.Scatter(
                                 x=device_data['ti_avg'].tolist(),
                                 y=device_data['si_avg'].tolist(),
-                                mode='markers',
+                mode='markers',
                                 name=trace_name,
                                 marker=dict(size=8, color=color),
                                 hovertemplate=f'<b>{codec} ({model})</b><br>' +
@@ -762,7 +874,7 @@ class ReportGenerator:
                                 showlegend=False
                             ),
                             row=2, col=1
-                        )
+            )
         
         # Update layout
         fig.update_layout(
@@ -858,6 +970,13 @@ class ReportGenerator:
                             <div id="device-filters"></div>
                         </div>
                         <div>
+                            <h4>Data Information:</h4>
+                            <div style="background: #e7f3ff; padding: 10px; border-radius: 4px; border-left: 4px solid #2196F3;">
+                                <strong>Note:</strong> VMAF values are plotted against actual achieved bitrates, not target bitrates. 
+                                This automatically accounts for bitrate accuracy differences between devices.
+                            </div>
+                        </div>
+                        <div>
                             <h4>Actions:</h4>
                             <button onclick="showAllTraces()">Show All</button>
                             <button onclick="hideAllTraces()">Hide All</button>
@@ -914,6 +1033,13 @@ class ReportGenerator:
                             </select>
                         </div>
                         <div>
+                            <h4>Data Information:</h4>
+                            <div style="background: #e7f3ff; padding: 10px; border-radius: 4px; border-left: 4px solid #2196F3;">
+                                <strong>Note:</strong> VMAF deltas are calculated from actual achieved bitrates, not target bitrates. 
+                                This automatically accounts for bitrate accuracy differences between devices.
+                            </div>
+                        </div>
+                        <div>
                             <h4>Actions:</h4>
                             <button onclick="showAllComparisonTraces()">Show All</button>
                             <button onclick="hideAllComparisonTraces()">Hide All</button>
@@ -946,18 +1072,27 @@ class ReportGenerator:
                 // Extract unique devices from quality data
                 function extractDevices() {{
                     var devices = new Set();
-                    qualityData.data.forEach(function(trace) {{
+                    console.log('🔍 EXTRACTING QUALITY DEVICES...');
+                    console.log('Quality data length:', qualityData.data.length);
+                    
+                    qualityData.data.forEach(function(trace, index) {{
                         var name = trace.name;
                         // Only process traces that have a name and match the expected format
                         if (name && typeof name === 'string') {{
                             // Extract device from trace name (format: "codec (device)")
-                            var match = name.match(/\\(([^)]+)\\)/);
-                            if (match) {{
-                                devices.add(match[1]);
+                        var match = name.match(/\\(([^)]+)\\)/);
+                        if (match) {{
+                            devices.add(match[1]);
+                                console.log('✅ Found quality device:', match[1]);
                             }}
+                        }} else {{
+                            console.log('❌ Skipping quality trace with invalid name:', name);
                         }}
                     }});
-                    return Array.from(devices).sort();
+                    
+                    var deviceArray = Array.from(devices).sort();
+                    console.log('📊 QUALITY DEVICES:', deviceArray);
+                    return deviceArray;
                 }}
                 
                 // Create device filter checkboxes
@@ -975,47 +1110,65 @@ class ReportGenerator:
                 // Extract unique devices from performance data
                 function extractPerformanceDevices() {{
                     var devices = new Set();
+                    console.log('🔍 EXTRACTING PERFORMANCE DEVICES...');
                     console.log('Performance data:', performanceData);
-                    performanceData.data.forEach(function(trace) {{
+                    console.log('Performance data length:', performanceData.data.length);
+                    
+                    // Log all trace names first to see what we have
+                    console.log('📋 ALL PERFORMANCE TRACE NAMES:');
+                    performanceData.data.forEach(function(trace, index) {{
+                        console.log('  Trace', index, ':', trace.name, '(type:', typeof trace.name, ')');
+                    }});
+                    
+                    performanceData.data.forEach(function(trace, index) {{
                         try {{
-                            var name = trace.name;
-                            console.log('Performance trace name:', name);
+                        var name = trace.name;
                             // Only process traces that have a name and match the expected format
                             if (name && typeof name === 'string' && name.length > 0) {{
-                                // Extract device from trace name (format: "codec (device)")
-                                var match = name.match(/\\(([^)]+)\\)/);
-                                if (match) {{
-                                    devices.add(match[1]);
-                                    console.log('Found device:', match[1]);
+                        // Extract device from trace name (format: "codec (device)")
+                        var match = name.match(/\\(([^)]+)\\)/);
+                        if (match) {{
+                            devices.add(match[1]);
+                                    console.log('✅ Found device:', match[1]);
+                                }} else {{
+                                    console.log('❌ No device match for:', name);
                                 }}
                             }} else {{
-                                console.log('Skipping trace with invalid name:', name);
+                                console.log('❌ Skipping trace with invalid name:', name);
                             }}
                         }} catch (error) {{
-                            console.log('Error processing trace:', error, trace);
+                            console.log('❌ Error processing trace:', error, trace);
                         }}
                     }});
-                    console.log('Extracted devices:', Array.from(devices));
-                    return Array.from(devices).sort();
+                    
+                    var deviceArray = Array.from(devices).sort();
+                    console.log('📊 FINAL EXTRACTED DEVICES:', deviceArray);
+                    console.log('📊 EXPECTED DEVICES: V2413, SM-S936U1, Pixel 8');
+                    return deviceArray;
                 }}
                 
                 // Create performance device filter checkboxes
                 function createPerformanceDeviceFilters() {{
+                    console.log('🔧 CREATING PERFORMANCE DEVICE FILTERS...');
                     var devices = extractPerformanceDevices();
                     var container = document.getElementById('perf-device-filters');
-                    console.log('Creating performance device filters for devices:', devices);
+                    console.log('Devices found:', devices);
                     console.log('Container element:', container);
                     if (devices.length === 0) {{
-                        console.log('No devices found for performance filters');
+                        console.log('❌ No devices found for performance filters');
                         container.innerHTML = '<p>No device data available</p>';
                         return;
                     }}
+                    console.log('✅ Creating', devices.length, 'device checkboxes');
                     devices.forEach(function(device) {{
+                        var checkboxId = 'perf-filter-device-' + device.replace(/[^a-zA-Z0-9]/g, '_');
                         var label = document.createElement('label');
-                        label.innerHTML = '<input type="checkbox" id="perf-filter-device-' + device.replace(/[^a-zA-Z0-9]/g, '_') + '" checked onchange="filterPerformanceTraces()"> ' + device;
+                        label.innerHTML = '<input type="checkbox" id="' + checkboxId + '" checked onchange="filterPerformanceTraces()"> ' + device;
                         container.appendChild(label);
                         container.appendChild(document.createElement('br'));
+                        console.log('  Created checkbox:', checkboxId);
                     }});
+                    console.log('🔧 PERFORMANCE DEVICE FILTERS CREATED');
                 }}
                 
                 // Extract unique devices from comparison data
@@ -1100,6 +1253,10 @@ class ReportGenerator:
                 
                 // Get codec type from trace name
                 function getCodecType(traceName) {{
+                    if (!traceName || typeof traceName !== 'string') {{
+                        console.log('⚠️ getCodecType called with invalid name:', traceName);
+                        return 'other';
+                    }}
                     var name = traceName.toLowerCase();
                     if (name.includes('av1')) return 'av1';
                     if (name.includes('hevc') || name.includes('h265')) return 'hevc';
@@ -1110,6 +1267,10 @@ class ReportGenerator:
                 
                 // Get device from trace name
                 function getDevice(traceName) {{
+                    if (!traceName || typeof traceName !== 'string') {{
+                        console.log('⚠️ getDevice called with invalid name:', traceName);
+                        return '';
+                    }}
                     var match = traceName.match(/\\(([^)]+)\\)/);
                     return match ? match[1] : '';
                 }}
@@ -1150,8 +1311,8 @@ class ReportGenerator:
                     if (visibleTraces.length === 0) {{
                         Plotly.restyle('quality-plots', {{visible: 'legendonly'}}, {{}});
                     }} else {{
-                        Plotly.restyle('quality-plots', {{visible: 'legendonly'}}, {{}});
-                        Plotly.restyle('quality-plots', {{visible: true}}, visibleTraces);
+                    Plotly.restyle('quality-plots', {{visible: 'legendonly'}}, {{}});
+                    Plotly.restyle('quality-plots', {{visible: true}}, visibleTraces);
                     }}
                 }}
                 
@@ -1193,6 +1354,7 @@ class ReportGenerator:
                 
                 // Filter performance traces based on checkboxes
                 function filterPerformanceTraces() {{
+                    console.log('🔍 Filtering performance traces...');
                     var visibleTraces = [];
                     var codecFilters = {{
                         av1: document.getElementById('perf-filter-av1').checked,
@@ -1201,10 +1363,30 @@ class ReportGenerator:
                         vp8: document.getElementById('perf-filter-vp8').checked
                     }};
                     
+                    console.log('Codec filters:', codecFilters);
+                    
                     // Check if any codec filters are enabled
                     var anyCodecEnabled = Object.values(codecFilters).some(function(enabled) {{ return enabled; }});
+                    console.log('Any codec enabled:', anyCodecEnabled);
+                    
+                    // Debug: Check what device checkboxes exist
+                    var deviceCheckboxes = document.querySelectorAll('#perf-device-filters input[type="checkbox"]');
+                    console.log('🔍 DEVICE CHECKBOXES: Found', deviceCheckboxes.length, 'checkboxes');
+                    if (deviceCheckboxes.length === 0) {{
+                        console.log('❌ NO DEVICE CHECKBOXES FOUND! Check if createPerformanceDeviceFilters() is working');
+                    }} else {{
+                        deviceCheckboxes.forEach(function(checkbox, index) {{
+                            console.log('  ', checkbox.id, '=', checkbox.checked);
+                        }});
+                    }}
                     
                     performanceData.data.forEach(function(trace, index) {{
+                        // Skip traces with undefined or invalid names (likely confidence intervals)
+                        if (!trace.name || typeof trace.name !== 'string' || trace.name.length === 0) {{
+                            console.log('Trace', index, ': SKIPPING (undefined/invalid name)');
+                            return;
+                        }}
+                        
                         var codecType = getCodecType(trace.name);
                         var device = getDevice(trace.name);
                         var deviceFilterId = 'perf-filter-device-' + device.replace(/[^a-zA-Z0-9]/g, '_');
@@ -1213,6 +1395,8 @@ class ReportGenerator:
                         
                         var codecEnabled = codecFilters[codecType] !== false;
                         
+                        console.log('Trace', index, ':', trace.name, 'codec:', codecType, 'device:', device, 'codecEnabled:', codecEnabled, 'deviceEnabled:', deviceEnabled);
+                        
                         // If no codecs are selected, show nothing
                         if (!anyCodecEnabled) {{
                             return;
@@ -1220,15 +1404,39 @@ class ReportGenerator:
                         
                         if (codecEnabled && deviceEnabled) {{
                             visibleTraces.push(index);
+                            console.log('  -> VISIBLE');
+                        }} else {{
+                            console.log('  -> HIDDEN');
                         }}
                     }});
                     
+                    console.log('Visible traces:', visibleTraces);
+                    
                     // If no traces should be visible, hide all
                     if (visibleTraces.length === 0) {{
-                        Plotly.restyle('performance-plots', {{visible: 'legendonly'}}, {{}});
+                    Plotly.restyle('performance-plots', {{visible: 'legendonly'}}, {{}});
                     }} else {{
+                        // First hide all traces
                         Plotly.restyle('performance-plots', {{visible: 'legendonly'}}, {{}});
-                        Plotly.restyle('performance-plots', {{visible: true}}, visibleTraces);
+                        
+                        // Then show only the visible traces AND their associated confidence intervals
+                        var tracesToShow = [];
+                        visibleTraces.forEach(function(traceIndex) {{
+                            var trace = performanceData.data[traceIndex];
+                            if (trace && trace.legendgroup) {{
+                                // Find all traces with the same legendgroup (main trace + confidence intervals)
+                                performanceData.data.forEach(function(t, index) {{
+                                    if (t.legendgroup === trace.legendgroup) {{
+                                        tracesToShow.push(index);
+                                    }}
+                                }});
+                            }} else {{
+                                tracesToShow.push(traceIndex);
+                            }}
+                        }});
+                        
+                        console.log('Traces to show (including confidence intervals):', tracesToShow);
+                        Plotly.restyle('performance-plots', {{visible: true}}, tracesToShow);
                     }}
                 }}
                 
@@ -1357,6 +1565,293 @@ class ReportGenerator:
                 
                 // Store raw VMAF data for delta calculations
                 var rawVmafData = {{}};
+                
+                // Store original plot data for bitrate scaling
+                var originalQualityData = null;
+                var originalComparisonData = null;
+                
+                // Store bitrate accuracy data for scaling calculations
+                var bitrateAccuracyData = {{}};
+                
+                // Get scaled VMAF data based on bitrate accuracy
+                function getScaledVmafData() {{
+                    var scaledData = {{}};
+                    
+                    Object.keys(rawVmafData).forEach(function(device) {{
+                        var deviceData = rawVmafData[device];
+                        var scaledBitrates = [...deviceData.bitrates];
+                        var scaledVmaf = [];
+                        
+                        if (bitrateAccuracyData[device]) {{
+                            var accuracyData = bitrateAccuracyData[device];
+                            
+                            for (var i = 0; i < deviceData.bitrates.length; i++) {{
+                                var requestedBitrate = deviceData.bitrates[i];
+                                var actualBitrate = requestedBitrate; // Default fallback
+                                var bitrateRatio = 1.0; // Default no scaling
+                                
+                                // Find closest requested bitrate match
+                                var closestIndex = 0;
+                                var minDiff = Math.abs(accuracyData.requestedBitrates[0] - requestedBitrate);
+                                
+                                for (var j = 1; j < accuracyData.requestedBitrates.length; j++) {{
+                                    var diff = Math.abs(accuracyData.requestedBitrates[j] - requestedBitrate);
+                                    if (diff < minDiff) {{
+                                        minDiff = diff;
+                                        closestIndex = j;
+                                    }}
+                                }}
+                                
+                                actualBitrate = accuracyData.actualBitrates[closestIndex];
+                                bitrateRatio = requestedBitrate / actualBitrate;
+                                
+                                var scaledVmafValue = deviceData.vmaf[i] * bitrateRatio;
+                                scaledVmaf.push(scaledVmafValue);
+                            }}
+                        }} else {{
+                            // No bitrate accuracy data, use original values
+                            scaledVmaf = [...deviceData.vmaf];
+                        }}
+                        
+                        scaledData[device] = {{
+                            bitrates: scaledBitrates,
+                            vmaf: scaledVmaf,
+                            name: deviceData.name
+                        }};
+                    }});
+                    
+                    console.log('Generated scaled VMAF data:', scaledData);
+                    return scaledData;
+                }}
+                
+                // Extract bitrate accuracy data from quality plots
+                function extractBitrateAccuracyData() {{
+                    bitrateAccuracyData = {{}};
+                    if (qualityData && qualityData.data) {{
+                        console.log('🔍 Looking for bitrate accuracy data in', qualityData.data.length, 'traces');
+                        qualityData.data.forEach(function(trace, index) {{
+                            console.log('Trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis);
+                            
+                            if (trace.name && trace.x && trace.y && trace.x.length > 0 && trace.y.length > 0) {{
+                                // Look for traces in the "Target vs Actual Bitrate" subplot (usually yaxis: 'y3' or similar)
+                                var isBitrateAccuracy = (trace.xaxis === 'x3' && trace.yaxis === 'y3') || 
+                                                      trace.name.toLowerCase().includes('bitrate') ||
+                                                      (trace.x.every(function(x) {{ return x > 0 && x < 50000; }}) && 
+                                                       trace.y.every(function(y) {{ return y > 0 && y < 50000; }}));
+                                
+                                console.log('  Bitrate accuracy check:', isBitrateAccuracy, 'x range:', Math.min(...trace.x), '-', Math.max(...trace.x), 'y range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                
+                                if (isBitrateAccuracy) {{
+                                    // Extract device name from trace name
+                                    var deviceMatch = trace.name.match(/\\(([^)]+)\\)/);
+                                    if (deviceMatch) {{
+                                        var deviceName = deviceMatch[1];
+                                        bitrateAccuracyData[deviceName] = {{
+                                            requestedBitrates: trace.x, // Target bitrates
+                                            actualBitrates: trace.y,    // Actual bitrates
+                                            name: trace.name
+                                        }};
+                                        console.log('✅ Extracted bitrate accuracy for', deviceName, ':', trace.x.length, 'data points');
+                                        console.log('  Sample data:', trace.x.slice(0, 3), '->', trace.y.slice(0, 3));
+                                    }} else {{
+                                        console.log('❌ Could not extract device name from:', trace.name);
+                                    }}
+                                }}
+                            }}
+                        }});
+                    }}
+                    console.log('📊 Final bitrate accuracy data:', bitrateAccuracyData);
+                    console.log('📊 Available devices:', Object.keys(bitrateAccuracyData));
+                }}
+                
+                // Toggle bitrate scaling for VMAF values
+                function toggleBitrateScaling(tab) {{
+                    console.log('🚨 FUNCTION CALLED: toggleBitrateScaling with tab:', tab);
+                    var checkbox = document.getElementById('bitrate-scaling-' + tab);
+                    var isEnabled = checkbox.checked;
+                    
+                    console.log('🔧 Bitrate scaling', isEnabled ? 'enabled' : 'disabled', 'for', tab, 'tab');
+                    console.log('Checkbox element:', checkbox);
+                    console.log('Data available - quality:', !!qualityData, 'comparison:', !!comparisonData);
+                    
+                    if (tab === 'quality') {{
+                        if (isEnabled) {{
+                            console.log('Applying scaling to quality tab...');
+                            applyBitrateScaling('quality');
+                        }} else {{
+                            console.log('Restoring original quality data...');
+                            restoreOriginalData('quality');
+                        }}
+                    }} else if (tab === 'comparison') {{
+                        if (isEnabled) {{
+                            console.log('Bitrate scaling enabled for comparison - regenerating with scaled data');
+                        }} else {{
+                            console.log('Bitrate scaling disabled for comparison - regenerating with original data');
+                        }}
+                        // Regenerate comparison plots with new scaling setting
+                        var selectedReference = document.getElementById('reference-selector').value;
+                        if (selectedReference) {{
+                            regenerateComparisonPlots(selectedReference);
+                        }}
+                    }}
+                }}
+                
+                // Apply bitrate scaling to VMAF values
+                function applyBitrateScaling(tab) {{
+                    console.log('🚀 Applying bitrate scaling to', tab, 'tab');
+                    
+                    if (tab === 'quality' && qualityData) {{
+                        console.log('Quality data found, processing', qualityData.data.length, 'traces');
+                        var scaledData = JSON.parse(JSON.stringify(qualityData)); // Deep copy
+                        
+                        scaledData.data.forEach(function(trace, index) {{
+                            console.log('Processing trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis);
+                            if (trace.name && trace.x && trace.y && trace.x.length > 0 && trace.y.length > 0) {{
+                                console.log('Original VMAF range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                
+                                // Scale VMAF values by bitrate ratio
+                                var scaledY = [];
+                                var originalY = [...trace.y]; // Store original values
+                                
+                                // Extract device name from trace name
+                                var deviceMatch = trace.name.match(/\\(([^)]+)\\)/);
+                                var deviceName = deviceMatch ? deviceMatch[1] : null;
+                                
+                                for (var i = 0; i < trace.y.length; i++) {{
+                                    var requestedBitrate = trace.x[i]; // VMAF plot x-axis is requested bitrate
+                                    var actualBitrate = requestedBitrate; // Default fallback
+                                    var bitrateRatio = 1.0; // Default no scaling
+                                    
+                                    // Find actual bitrate from bitrate accuracy data
+                                    if (deviceName && bitrateAccuracyData[deviceName]) {{
+                                        var accuracyData = bitrateAccuracyData[deviceName];
+                                        
+                                        // Find closest requested bitrate match
+                                        var closestIndex = 0;
+                                        var minDiff = Math.abs(accuracyData.requestedBitrates[0] - requestedBitrate);
+                                        
+                                        for (var j = 1; j < accuracyData.requestedBitrates.length; j++) {{
+                                            var diff = Math.abs(accuracyData.requestedBitrates[j] - requestedBitrate);
+                                            if (diff < minDiff) {{
+                                                minDiff = diff;
+                                                closestIndex = j;
+                                            }}
+                                        }}
+                                        
+                                        actualBitrate = accuracyData.actualBitrates[closestIndex];
+                                        bitrateRatio = requestedBitrate / actualBitrate;
+                                        
+                                        console.log('Device:', deviceName, 'Requested:', requestedBitrate, 'Actual:', actualBitrate, 'Ratio:', bitrateRatio.toFixed(3));
+                                    }} else {{
+                                        console.log('No bitrate accuracy data found for device:', deviceName);
+                                    }}
+                                    
+                                    var scaledVmaf = trace.y[i] * bitrateRatio;
+                                    scaledY.push(scaledVmaf);
+                                }}
+                                trace.y = scaledY;
+                                console.log('✅ Scaled trace:', trace.name, 'new range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                console.log('   Sample VMAF values (original -> scaled):');
+                                for (var k = 0; k < Math.min(3, trace.y.length); k++) {{
+                                    console.log('     ', originalY[k].toFixed(2), '->', scaledY[k].toFixed(2));
+                                }}
+                            }} else {{
+                                console.log('❌ Skipping trace', index, '- invalid data');
+                            }}
+                        }});
+                        
+                        console.log('🔄 Updating quality plots...');
+                        Plotly.react('quality-plots', scaledData.data, scaledData.layout, {{responsive: true}});
+                        console.log('✅ Applied bitrate scaling to quality plots');
+                        
+                    }} else if (tab === 'comparison' && comparisonData) {{
+                        console.log('Comparison data found, processing', comparisonData.data.length, 'traces');
+                        var scaledData = JSON.parse(JSON.stringify(comparisonData)); // Deep copy
+                        
+                        scaledData.data.forEach(function(trace, index) {{
+                            console.log('Processing comparison trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis);
+                            if (trace.xaxis === 'x' && trace.yaxis === 'y' && trace.name && trace.x && trace.y) {{
+                                console.log('Original delta range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                
+                                // Scale VMAF delta values by bitrate ratio
+                                var scaledY = [];
+                                var originalY = [...trace.y]; // Store original values
+                                
+                                // Extract device name from trace name
+                                var deviceMatch = trace.name.match(/\\(([^)]+)\\)/);
+                                var deviceName = deviceMatch ? deviceMatch[1] : null;
+                                
+                                for (var i = 0; i < trace.y.length; i++) {{
+                                    var requestedBitrate = trace.x[i]; // Comparison plot x-axis is requested bitrate
+                                    var actualBitrate = requestedBitrate; // Default fallback
+                                    var bitrateRatio = 1.0; // Default no scaling
+                                    
+                                    // Find actual bitrate from bitrate accuracy data
+                                    if (deviceName && bitrateAccuracyData[deviceName]) {{
+                                        var accuracyData = bitrateAccuracyData[deviceName];
+                                        
+                                        // Find closest requested bitrate match
+                                        var closestIndex = 0;
+                                        var minDiff = Math.abs(accuracyData.requestedBitrates[0] - requestedBitrate);
+                                        
+                                        for (var j = 1; j < accuracyData.requestedBitrates.length; j++) {{
+                                            var diff = Math.abs(accuracyData.requestedBitrates[j] - requestedBitrate);
+                                            if (diff < minDiff) {{
+                                                minDiff = diff;
+                                                closestIndex = j;
+                                            }}
+                                        }}
+                                        
+                                        actualBitrate = accuracyData.actualBitrates[closestIndex];
+                                        bitrateRatio = requestedBitrate / actualBitrate;
+                                        
+                                        console.log('Comparison Device:', deviceName, 'Requested:', requestedBitrate, 'Actual:', actualBitrate, 'Ratio:', bitrateRatio.toFixed(3));
+                                    }} else {{
+                                        console.log('No bitrate accuracy data found for comparison device:', deviceName);
+                                    }}
+                                    
+                                    var scaledVmaf = trace.y[i] * bitrateRatio;
+                                    scaledY.push(scaledVmaf);
+                                }}
+                                trace.y = scaledY;
+                                console.log('✅ Scaled comparison trace:', trace.name, 'new range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                console.log('   Sample delta values (original -> scaled):');
+                                for (var k = 0; k < Math.min(3, trace.y.length); k++) {{
+                                    console.log('     ', originalY[k].toFixed(2), '->', scaledY[k].toFixed(2));
+                                }}
+                            }} else {{
+                                console.log('❌ Skipping comparison trace', index, '- not a VMAF delta trace');
+                            }}
+                        }});
+                        
+                        console.log('🔄 Updating comparison plots...');
+                        Plotly.react('comparison-plots', scaledData.data, scaledData.layout, {{responsive: true}});
+                        console.log('✅ Applied bitrate scaling to comparison plots');
+                    }} else {{
+                        console.log('❌ No data available for', tab, 'tab');
+                    }}
+                }}
+                
+                // Restore original data without scaling
+                function restoreOriginalData(tab) {{
+                    console.log('Restoring original data for', tab, 'tab');
+                    
+                    if (tab === 'quality' && qualityData) {{
+                        Plotly.react('quality-plots', qualityData.data, qualityData.layout, {{responsive: true}});
+                        console.log('Restored original quality data');
+                    }} else if (tab === 'comparison' && comparisonData) {{
+                        // For comparison tab, we need to regenerate with current reference
+                        var selectedReference = document.getElementById('reference-selector').value;
+                        if (selectedReference) {{
+                            regenerateComparisonPlots(selectedReference);
+                        }} else {{
+                            Plotly.react('comparison-plots', comparisonData.data, comparisonData.layout, {{responsive: true}});
+                        }}
+                        console.log('Restored original comparison data');
+                    }} else {{
+                        console.log('No data available to restore for', tab, 'tab');
+                    }}
+                }}
                 
                 // Extract and store raw VMAF data from quality plots
                 function extractRawVmafData() {{
@@ -1495,11 +1990,12 @@ class ReportGenerator:
                 function extractOriginalVmafDeltaData() {{
                     originalVmafDeltaData = [];
                     if (comparisonData && comparisonData.data) {{
-                        console.log('Extracting original VMAF delta data from', comparisonData.data.length, 'traces');
+                        console.log('🔍 Extracting original VMAF delta data from', comparisonData.data.length, 'traces');
                         comparisonData.data.forEach(function(trace, index) {{
+                            console.log('🔍 Trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis, 'has x:', !!trace.x, 'has y:', !!trace.y);
                             // Look for VMAF delta traces (they should be in the first subplot)
                             if (trace.xaxis === 'x' && trace.yaxis === 'y' && trace.name && trace.x && trace.y) {{
-                                console.log('VMAF delta trace', index, ':', trace.name, 'y range:', Math.min(...trace.y), '-', Math.max(...trace.y));
+                                console.log('✅ VMAF delta trace', index, ':', trace.name, 'y range:', Math.min(...trace.y), '-', Math.max(...trace.y));
                                 originalVmafDeltaData.push({{
                                     x: trace.x,
                                     y: trace.y,
@@ -1510,67 +2006,85 @@ class ReportGenerator:
                                     xaxis: 'x',
                                     yaxis: 'y'
                                 }});
+                            }} else {{
+                                console.log('❌ Skipping trace', index, '- not a VMAF delta trace');
                             }}
                         }});
+                    }} else {{
+                        console.log('❌ No comparison data available');
                     }}
-                    console.log('Extracted original VMAF delta data:', originalVmafDeltaData);
+                    console.log('📊 Extracted original VMAF delta data:', originalVmafDeltaData.length, 'traces');
                 }}
                 
                 // Regenerate comparison plots with selected reference
                 function regenerateComparisonPlots(referenceDevice) {{
-                    console.log('Updating reference to:', referenceDevice);
+                    console.log('🔄 Updating reference to:', referenceDevice);
+                    console.log('📊 Available original VMAF delta data:', originalVmafDeltaData.length, 'traces');
                     
                     if (!referenceDevice) {{
-                        console.log('No reference device selected');
+                        console.log('❌ No reference device selected');
                         return;
                     }}
                     
-                    // Find the reference device trace in original data
+                    // Bitrate scaling is no longer available - VMAF deltas are already calculated against actual bitrates
+                    var scalingEnabled = false;
+                    console.log('Bitrate scaling disabled - using actual bitrates for delta calculation');
+                    
+                    // Find the reference trace in original VMAF delta data
                     var referenceTrace = null;
-                    var referenceDeviceName = '';
-                    originalVmafDeltaData.forEach(function(trace) {{
+                    var referenceDeltas = [];
+                    
+                    console.log('🔍 Looking for reference device:', referenceDevice, 'in', originalVmafDeltaData.length, 'traces');
+                    originalVmafDeltaData.forEach(function(trace, index) {{
+                        console.log('🔍 Checking trace', index, ':', trace.name, 'includes', referenceDevice, '?', trace.name.includes(referenceDevice));
                         if (trace.name && trace.name.includes(referenceDevice)) {{
                             referenceTrace = trace;
-                            referenceDeviceName = trace.name;
+                            referenceDeltas = trace.y;
+                            console.log('✅ Found reference trace:', trace.name, 'with deltas:', referenceDeltas);
                         }}
                     }});
                     
                     if (!referenceTrace) {{
-                        console.log('Reference device not found in original data:', referenceDevice);
+                        console.log('❌ No reference trace found for:', referenceDevice);
+                        console.log('Available traces:', originalVmafDeltaData.map(function(t) {{ return t.name; }}));
                         return;
                     }}
                     
-                    console.log('Found reference trace:', referenceDeviceName, 'with', referenceTrace.y.length, 'data points');
-                    
                     // Create new traces with adjusted deltas
                     var newTraces = [];
+                    
                     originalVmafDeltaData.forEach(function(trace) {{
-                        var adjustedY = [];
-                        
-                        if (trace.name === referenceDeviceName) {{
-                            // Reference device should show as 0 delta
-                            adjustedY = new Array(trace.y.length).fill(0);
-                        }} else {{
-                            // Other devices: subtract reference deltas from their deltas
-                            for (var i = 0; i < trace.y.length; i++) {{
-                                var refY = referenceTrace.y[i] || 0;
-                                var deviceY = trace.y[i] || 0;
-                                var adjustedDelta = deviceY - refY;
-                                adjustedY.push(adjustedDelta);
+                        if (trace.xaxis === 'x' && trace.yaxis === 'y') {{
+                            var adjustedY = [];
+                            
+                            if (trace.name === referenceTrace.name) {{
+                                // Reference device should show as 0 delta
+                                adjustedY = new Array(trace.y.length).fill(0);
+                                console.log('Setting reference device', trace.name, 'to 0 delta');
+                            }} else {{
+                                // Other devices: delta = device_delta - reference_delta
+                                for (var i = 0; i < trace.y.length; i++) {{
+                                    var deviceDelta = trace.y[i];
+                                    var refDelta = referenceDeltas[i] || 0;
+                                    var adjustedDelta = deviceDelta - refDelta;
+                                    adjustedY.push(adjustedDelta);
+                                }}
+                                console.log('Adjusted deltas for', trace.name, ':', adjustedY.slice(0, 3), '...');
                             }}
+                            
+                            newTraces.push({{
+                                x: trace.x,
+                                y: adjustedY,
+                                mode: trace.mode || 'markers+lines',
+                                name: trace.name,
+                                type: 'scatter',
+                                line: trace.line || {{ width: 2 }},
+                                marker: trace.marker || {{ size: 6 }},
+                                xaxis: 'x',
+                                yaxis: 'y',
+                                showlegend: trace.showlegend !== false
+                            }});
                         }}
-                        
-                        newTraces.push({{
-                            x: trace.x,
-                            y: adjustedY,
-                            mode: trace.mode,
-                            name: trace.name,
-                            type: 'scatter',
-                            line: trace.line,
-                            marker: trace.marker,
-                            xaxis: 'x',
-                            yaxis: 'y'
-                        }});
                     }});
                     
                     // Add SI/TI data to the second subplot
@@ -1593,16 +2107,149 @@ class ReportGenerator:
                     
                     // Update the plot title
                     var update = {{
-                        'title': 'VMAF Delta Comparison (Reference: ' + referenceDevice + ')'
+                        'title': 'VMAF Delta Comparison (Reference: ' + referenceDevice + ')' + (scalingEnabled ? ' - Bitrate Scaled' : '')
                     }};
                     Plotly.relayout('comparison-plots', update);
                     
                     console.log('✅ REFERENCE SWITCHING ACTIVE: Updated comparison plot with', newTraces.length, 'traces');
-                    console.log('Reference device:', referenceDeviceName, 'now shows as 0 delta');
+                    console.log('Reference device:', referenceDevice, 'now shows as 0 delta');
+                    console.log('⚠️ Bitrate scaling for comparison not yet implemented - using original data');
+                }}
+                
+                // Verify delta calculations using Quality tab VMAF data
+                function verifyDeltaCalculations() {{
+                    console.log('=== DELTA CALCULATION VERIFICATION ===');
+                    
+                    if (!qualityData || !originalVmafDeltaData) {{
+                        console.log('❌ Missing data for verification');
+                        return;
+                    }}
+                    
+                    // Extract VMAF data from Quality tab plots
+                    var qualityVmafData = {{}};
+                    qualityData.data.forEach(function(trace) {{
+                        if (trace.name && trace.x && trace.y && trace.xaxis === 'x' && trace.yaxis === 'y') {{
+                            // This should be a VMAF trace from the first subplot
+                            var deviceMatch = trace.name.match(/\\(([^)]+)\\)/);
+                            if (deviceMatch) {{
+                                var deviceName = deviceMatch[1];
+                                
+                                // Convert actual bitrates to target bitrates (round to nearest even number in Mbps)
+                                var targetBitrates = trace.x.map(function(actualBitrate) {{
+                                    // Convert kbps to Mbps and round to nearest even number
+                                    var mbps = actualBitrate / 1000;
+                                    var roundedMbps = Math.round(mbps / 2) * 2; // Round to nearest even number
+                                    return roundedMbps * 1000; // Convert back to kbps
+                                }});
+                                
+                                qualityVmafData[deviceName] = {{
+                                    bitrates: targetBitrates, // Converted to target bitrates
+                                    vmaf: trace.y,
+                                    name: trace.name
+                                }};
+                                console.log('Found VMAF data for', deviceName, ':', trace.x.length, 'points');
+                                console.log('  Actual bitrates:', trace.x.slice(0, 3), '-> Target bitrates:', targetBitrates.slice(0, 3));
+                            }}
+                        }}
+                    }});
+                    
+                    console.log('Quality VMAF data devices:', Object.keys(qualityVmafData));
+                    
+                    if (Object.keys(qualityVmafData).length === 0) {{
+                        console.log('❌ No VMAF data found in Quality tab');
+                        return;
+                    }}
+                    
+                    // Find a reference device
+                    var referenceDevice = Object.keys(qualityVmafData)[0];
+                    console.log('Using reference device:', referenceDevice);
+                    
+                    // Test with another device
+                    var testDevice = null;
+                    Object.keys(qualityVmafData).forEach(function(device) {{
+                        if (device !== referenceDevice && !testDevice) {{
+                            testDevice = device;
+                        }}
+                    }});
+                    
+                    if (!testDevice) {{
+                        console.log('❌ No test device found');
+                        return;
+                    }}
+                    
+                    console.log('\\nTesting with device:', testDevice);
+                    
+                    // Calculate delta using Quality tab VMAF data
+                    var referenceBitrates = qualityVmafData[referenceDevice].bitrates;
+                    var referenceVmaf = qualityVmafData[referenceDevice].vmaf;
+                    var deviceBitrates = qualityVmafData[testDevice].bitrates;
+                    var deviceVmaf = qualityVmafData[testDevice].vmaf;
+                    
+                    console.log('Reference bitrates:', referenceBitrates.slice(0, 3), '...');
+                    console.log('Reference VMAF:', referenceVmaf.slice(0, 3), '...');
+                    console.log('Device bitrates:', deviceBitrates.slice(0, 3), '...');
+                    console.log('Device VMAF:', deviceVmaf.slice(0, 3), '...');
+                    
+                    // Calculate first few deltas manually - match by target bitrate
+                    var calculatedDeltas = [];
+                    for (var i = 0; i < Math.min(3, deviceBitrates.length); i++) {{
+                        var targetBitrate = deviceBitrates[i];
+                        
+                        // Find the reference VMAF at the same target bitrate
+                        var refVmaf = null;
+                        for (var j = 0; j < referenceBitrates.length; j++) {{
+                            if (Math.abs(referenceBitrates[j] - targetBitrate) < 1) {{ // Exact match within 1 kbps
+                                refVmaf = referenceVmaf[j];
+                                break;
+                            }}
+                        }}
+                        
+                        if (refVmaf !== null) {{
+                            var delta = deviceVmaf[i] - refVmaf;
+                            calculatedDeltas.push(delta);
+                            console.log('Point', i, ':', targetBitrate, 'kbps (exact match), VMAF', deviceVmaf[i], '-', refVmaf, '=', delta);
+                        }} else {{
+                            console.log('Point', i, ':', targetBitrate, 'kbps - no matching reference bitrate found');
+                        }}
+                    }}
+                    
+                    // Find original delta trace
+                    var originalTrace = null;
+                    originalVmafDeltaData.forEach(function(trace) {{
+                        if (trace.name && trace.name.includes(testDevice)) {{
+                            originalTrace = trace;
+                        }}
+                    }});
+                    
+                    if (originalTrace) {{
+                        console.log('\\nOriginal deltas (first 3):', originalTrace.y.slice(0, 3));
+                        console.log('Calculated deltas (first 3):', calculatedDeltas);
+                        
+                        var matches = true;
+                        for (var i = 0; i < Math.min(3, calculatedDeltas.length); i++) {{
+                            var diff = Math.abs(calculatedDeltas[i] - originalTrace.y[i]);
+                            if (diff > 0.1) {{
+                                matches = false;
+                                console.log('MISMATCH at point', i, ':', calculatedDeltas[i], 'vs', originalTrace.y[i], 'diff:', diff);
+                            }}
+                        }}
+                        
+                        if (matches) {{
+                            console.log('✅ CALCULATIONS MATCH!');
+                        }} else {{
+                            console.log('❌ CALCULATIONS DO NOT MATCH!');
+                        }}
+                    }} else {{
+                        console.log('❌ No original delta trace found for', testDevice);
+                    }}
+                    
+                    console.log('=== END VERIFICATION ===');
                 }}
                 
                 // Initialize plots
                 function initializePlots() {{
+                    console.log('🚨 INITIALIZE PLOTS STARTED');
+                    
                     // Load quality plots
                     Plotly.newPlot('quality-plots', qualityData.data, qualityData.layout, {{responsive: true}});
                     
@@ -1621,11 +2268,24 @@ class ReportGenerator:
                     // Extract original VMAF delta data for reference switching
                     extractOriginalVmafDeltaData();
                     
+                    // Extract bitrate accuracy data for scaling calculations
+                    extractBitrateAccuracyData();
+                    
+                    // Verify delta calculations
+                    console.log('🚨 CALLING VERIFICATION FUNCTION...');
+                    verifyDeltaCalculations();
+                    console.log('🚨 VERIFICATION FUNCTION COMPLETED');
+                    
                     // Create device filters after plots are loaded
                     createDeviceFilters();
                     createPerformanceDeviceFilters();
                     createComparisonDeviceFilters();
                     createReferenceSelector();
+                    
+                    // Apply initial filtering
+                    filterTraces();
+                    filterPerformanceTraces();
+                    filterComparisonTraces();
                 }}
                 
                 // Initialize when page loads

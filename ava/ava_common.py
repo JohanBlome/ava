@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 import pathlib
-from typing import Any
+from typing import Any, List
 from enum import StrEnum
 from google.protobuf import text_format
 
@@ -487,6 +487,50 @@ def find_bitrate_for_video(videopath: str, encoder: str) -> str:
     ratio = pixelrate / higher
     bitrate = int(ratio * pixelrates[higher])
     return f"{bitrate}kbps"
+
+
+def run_encapp_stats_to_csv(json_files: List[str], output_dir: str) -> List[str]:
+    """Run encapp_stats_to_csv.py to generate performance CSV files from JSON files"""
+    if not encapp or not encapp_tool:
+        print("Warning: encapp not available, cannot generate performance CSV files")
+        return []
+    
+    csv_files = []
+    
+    try:
+        # Look for encapp_stats_to_csv.py in the lib/encapp directory
+        encapp_stats_path = None
+        possible_paths = [
+            "lib/encapp/scripts/encapp_stats_to_csv.py",
+            "../lib/encapp/scripts/encapp_stats_to_csv.py",
+            "encapp_stats_to_csv.py"
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                encapp_stats_path = path
+                break
+        
+        if not encapp_stats_path:
+            print("Warning: encapp_stats_to_csv.py not found, cannot generate performance CSV files")
+            return []
+        
+        # Run encapp_stats_to_csv on all JSON files
+        cmd = ["python3", encapp_stats_path] + json_files
+        print(f"Running encapp_stats_to_csv: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        # Find generated CSV files
+        for json_file in json_files:
+            csv_file = f"{json_file}_encoding_data.csv"
+            if os.path.exists(csv_file):
+                csv_files.append(csv_file)
+                print(f"Generated performance CSV: {csv_file}")
+        
+    except Exception as e:
+        print(f"Error running encapp_stats_to_csv: {e}")
+    
+    return csv_files
 
 
 def is_vbr_supported(device, encoder: str) -> bool:

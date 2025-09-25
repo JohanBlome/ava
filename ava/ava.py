@@ -662,6 +662,22 @@ class IntegratedTestRunner:
         
         for result in test_results:
             if result.success and result.output_files:
+                # Check if quality data already exists and has content
+                if (hasattr(result, 'test_data') and result.test_data and 
+                    'quality_csv' in result.test_data and 
+                    os.path.exists(result.test_data['quality_csv'])):
+                    # Check if the CSV file has actual data (more than just headers)
+                    try:
+                        import pandas as pd
+                        df = pd.read_csv(result.test_data['quality_csv'])
+                        if not df.empty and len(df) > 0:
+                            self.logger.info(f"Quality data already exists for {result.test_name} on {result.device_serial}, skipping analysis")
+                            continue
+                        else:
+                            self.logger.info(f"Quality CSV exists but is empty for {result.test_name} on {result.device_serial}, re-running analysis")
+                    except Exception as e:
+                        self.logger.info(f"Quality CSV exists but is corrupted for {result.test_name} on {result.device_serial}, re-running analysis: {e}")
+                
                 self.logger.info(f"Running quality assessment for {result.test_name} on {result.device_serial}")
                 
                 # Find JSON files in the output
@@ -697,6 +713,20 @@ class IntegratedTestRunner:
                                 self.logger.warning(f"Failed to parse quality data from {csv_output}")
                         else:
                             self.logger.warning(f"Failed to generate quality data for {result.test_name}")
+                        
+                        # Generate performance CSV files from JSON files
+                        self.logger.info(f"Generating performance CSV files for {result.test_name}")
+                        try:
+                            performance_csv_files = ava_common.run_encapp_stats_to_csv(json_files, output_dir)
+                            if performance_csv_files:
+                                if result.test_data is None:
+                                    result.test_data = {}
+                                result.test_data["stats_csv"] = performance_csv_files
+                                self.logger.info(f"Successfully generated {len(performance_csv_files)} performance CSV files for {result.test_name}")
+                            else:
+                                self.logger.warning(f"No performance CSV files generated for {result.test_name}")
+                        except Exception as e:
+                            self.logger.error(f"Error generating performance CSV files for {result.test_name}: {e}")
                             
                     except Exception as e:
                         self.logger.error(f"Error running quality assessment for {result.test_name}: {e}")
