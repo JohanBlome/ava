@@ -156,7 +156,8 @@ class ReportGenerator:
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     codec_type = self._get_codec_type(codec)
                     line_style = self._get_codec_line_style(codec_type)
                     trace_name = self._get_trace_name(codec, model)
@@ -187,7 +188,8 @@ class ReportGenerator:
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                         
                         # Get consistent color and line style
-                        color = self._get_device_color(model)
+                        # Use codec name for color when using custom labels, device name otherwise
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                         codec_type = self._get_codec_type(codec)
                         line_style = self._get_codec_line_style(codec_type)
                         trace_name = self._get_trace_name(codec, model)
@@ -218,7 +220,8 @@ class ReportGenerator:
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                         
                         # Get consistent color and line style
-                        color = self._get_device_color(model)
+                        # Use codec name for color when using custom labels, device name otherwise
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                         codec_type = self._get_codec_type(codec)
                         line_style = self._get_codec_line_style(codec_type)
                         trace_name = self._get_trace_name(codec, model)
@@ -246,7 +249,8 @@ class ReportGenerator:
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     codec_type = self._get_codec_type(codec)
                     line_style = self._get_codec_line_style(codec_type)
                     trace_name = self._get_trace_name(codec, model)
@@ -274,7 +278,8 @@ class ReportGenerator:
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     codec_type = self._get_codec_type(codec)
                     line_style = self._get_codec_line_style(codec_type)
                     trace_name = self._get_trace_name(codec, model)
@@ -344,8 +349,29 @@ class ReportGenerator:
             'V2413': '#2ca02c',        # Green
             '10AEBC0MDC001DC': '#d62728', # Red
             'R5CXC2ZH3DR': '#9467bd',   # Purple
-            '39251FDJH0093R': '#8c564b'  # Brown
+            '39251FDJH0093R': '#8c564b',  # Brown
+            # Add custom label colors
+            'config 1': '#2ca02c',     # Green
+            'config 2': '#ff7f0e',     # Orange
+            'hevc_v1.0': '#2ca02c',    # Green
+            'hevc_v2.0': '#ff7f0e',    # Orange
+            'dolby_hevc_v1': '#2ca02c', # Green
+            'qualcomm_hevc_v2': '#ff7f0e', # Orange
         }
+        
+        # If not found in predefined colors, generate a consistent color based on the name
+        if device_name not in device_colors:
+            # Use hash of the name to generate a consistent color
+            import hashlib
+            hash_obj = hashlib.md5(device_name.encode())
+            hash_int = int(hash_obj.hexdigest()[:8], 16)
+            # Generate a color from the hash
+            hue = (hash_int % 360) / 360.0
+            import colorsys
+            rgb = colorsys.hsv_to_rgb(hue, 0.7, 0.9)
+            color = f"#{int(rgb[0]*255):02x}{int(rgb[1]*255):02x}{int(rgb[2]*255):02x}"
+            return color
+        
         return device_colors.get(device_name, '#17becf')  # Default cyan
     
     def _get_codec_line_style(self, codec_type: str) -> str:
@@ -361,6 +387,49 @@ class ReportGenerator:
     def _get_trace_name(self, codec: str, device: str) -> str:
         """Get consistent trace name for filtering"""
         return f"{codec} ({device})"
+    
+    def _get_color_for_trace(self, codec: str, device: str, test_name: str = None) -> str:
+        """Get consistent color for trace, considering custom labels"""
+        # If this is a custom labeled test, use the custom label for color assignment
+        if test_name and test_name.startswith("quality_analysis_") and len(test_name.split("_")) > 2:
+            custom_label = "_".join(test_name.split("_")[2:])  # Everything after "quality_analysis_"
+            # Use custom label for color assignment instead of original codec
+            return self._get_device_color(custom_label)
+        else:
+            # Original behavior: use device name for color
+            return self._get_device_color(device)
+    
+    def _get_line_style_for_trace(self, codec: str, test_name: str = None) -> str:
+        """Get consistent line style for trace, considering custom labels"""
+        # If this is a custom labeled test, use the custom label for line style
+        if test_name and test_name.startswith("quality_analysis_") and len(test_name.split("_")) > 2:
+            custom_label = "_".join(test_name.split("_")[2:])  # Everything after "quality_analysis_"
+            # Use custom label for line style instead of original codec
+            return self._get_codec_line_style(self._get_codec_type(custom_label))
+        else:
+            # Original behavior: use original codec name for line style
+            return self._get_codec_line_style(self._get_codec_type(codec))
+    
+    def _is_custom_labeled_codec(self, codec: str) -> bool:
+        """Check if a codec name is a custom label (not a standard codec name)"""
+        # Custom labels are typically short names like "config 1", "hevc_v1.0", etc.
+        # Standard codec names are longer and contain specific patterns
+        standard_codec_patterns = [
+            'c2.dolby.encoder.hevc',
+            'c2.qti.hevc.encoder.hdr',
+            'c2.av1.encoder',
+            'c2.avc.encoder',
+            'c2.vp8.encoder',
+            'c2.vp9.encoder'
+        ]
+        
+        # If it matches a standard codec pattern, it's not a custom label
+        for pattern in standard_codec_patterns:
+            if pattern in codec.lower():
+                return False
+        
+        # If it's a short name (less than 20 characters) and doesn't contain standard patterns, it's likely a custom label
+        return len(codec) < 20 and not any(pattern in codec.lower() for pattern in ['encoder', 'codec', 'h264', 'h265', 'av1', 'vp8', 'vp9'])
     
     def _calculate_frame_statistics(self, device_data: pd.DataFrame, metric_column: str) -> tuple:
         """Calculate frame-based statistics with confidence intervals"""
@@ -460,7 +529,8 @@ class ReportGenerator:
                     codec_type = self._get_codec_type(codec)
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     line_style = self._get_codec_line_style(codec_type)
                     
                     # Add main line
@@ -526,7 +596,8 @@ class ReportGenerator:
                     codec_type = self._get_codec_type(codec)
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     line_style = self._get_codec_line_style(codec_type)
                     
                     # Add main line
@@ -597,7 +668,8 @@ class ReportGenerator:
                     codec_type = self._get_codec_type(codec)
                     
                     # Get consistent color and line style
-                    color = self._get_device_color(model)
+                    # Use codec name for color when using custom labels, device name otherwise
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     line_style = self._get_codec_line_style(codec_type)
         
         fig.add_trace(
@@ -667,7 +739,8 @@ class ReportGenerator:
                         trace_name = f"{codec} ({model})"
                         
                         # Get consistent color (no line style variation)
-                        color = self._get_device_color(model)
+                        # Use codec name for color when using custom labels, device name otherwise
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
             
                         # Only show legend for the first target bitrate of each device/codec combination
                         show_legend = bool(target_bitrate == combined_df[combined_df['codec'] == codec]['bitrate'].min())
@@ -846,7 +919,8 @@ class ReportGenerator:
                             delta_vmaf = vmaf_values - ref_vmaf_interp
         
                             # Get consistent color and line style
-                            color = self._get_device_color(model)
+                            # Use codec name for color when using custom labels, device name otherwise
+                            color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                             codec_type = self._get_codec_type(codec)
                             line_style = self._get_codec_line_style(codec_type)
                             trace_name = self._get_trace_name(codec, model)
@@ -878,7 +952,8 @@ class ReportGenerator:
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
         
                         # Get consistent color and line style
-                        color = self._get_device_color(model)
+                        # Use codec name for color when using custom labels, device name otherwise
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                         codec_type = self._get_codec_type(codec)
                         trace_name = self._get_trace_name(codec, model)
         
