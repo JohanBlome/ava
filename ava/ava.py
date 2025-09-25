@@ -1181,7 +1181,7 @@ def main(argv):
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         options.workdir = os.path.join(tempfile.gettempdir(), f"ava_tests_{timestamp}")
-    
+
     # Create configuration
     config = TestConfig(
         debug=options.debug,
@@ -1254,7 +1254,7 @@ def main(argv):
     
     if options.generate_sources:
         generator = VideoSourceGenerator(debug=config.debug > 0)
-        sources = generator.generate_all_standard_sources()
+        sources = generator.generate_all_standard_sources(duration=options.video_duration)
         print(f"Generated {len(sources)} video sources")
         for source in sources:
             print(f"  - {source}")
