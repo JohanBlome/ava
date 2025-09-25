@@ -66,12 +66,15 @@ class TestConfig:
     use_yuv_encoding: bool = False
     enable_device_decode: bool = True
     mediastore: str = "_mediastore"
+    quality_data: Optional[List[str]] = None
     
     def __post_init__(self):
         if self.android_serials is None:
             self.android_serials = []
         if self.input_files is None:
             self.input_files = [f"{Path(__file__).parent}/../vid/johnny.1280x720.60fps.264.mp4"]
+        if self.quality_data is None:
+            self.quality_data = []
 
 
 @dataclass
@@ -615,10 +618,14 @@ class IntegratedTestRunner:
         """Generate reports from existing test data without running new tests"""
         self.logger.info("Generating reports from existing test data")
         
-        # Step 1: Load existing test results from workdir
-        test_results = self._load_existing_test_results()
+        # Step 1: Load test results from workdir or quality_data
+        if self.config.quality_data:
+            test_results = self._load_test_results_from_quality_data()
+        else:
+            test_results = self._load_existing_test_results()
+        
         if not test_results:
-            self.logger.error("No existing test results found in workdir")
+            self.logger.error("No test results found")
             return
         
         # Step 2: Run quality assessment on existing JSON files
@@ -638,10 +645,14 @@ class IntegratedTestRunner:
         """Run quality assessment on existing test data without running new tests"""
         self.logger.info("Running quality assessment on existing test data")
         
-        # Step 1: Load existing test results from workdir
-        test_results = self._load_existing_test_results()
+        # Step 1: Load test results from workdir or quality_data
+        if self.config.quality_data:
+            test_results = self._load_test_results_from_quality_data()
+        else:
+            test_results = self._load_existing_test_results()
+        
         if not test_results:
-            self.logger.error("No existing test results found in workdir")
+            self.logger.error("No test results found")
             return
         
         # Step 2: Run quality assessment on existing data
@@ -653,7 +664,7 @@ class IntegratedTestRunner:
         reports = self._generate_reports(test_results, [])
         
         # Step 4: Print summary
-        self._print_summary(test_results, [], reports)
+        self._print_summary(test_results, reports)
         
         return test_results, reports
     
@@ -948,6 +959,72 @@ class IntegratedTestRunner:
         
         return test_results
     
+    def _load_test_results_from_quality_data(self) -> List[TestResult]:
+        """Load test results from directly specified quality CSV files"""
+        test_results = []
+        
+        for quality_csv in self.config.quality_data:
+            if not os.path.exists(quality_csv):
+                self.logger.warning(f"Quality CSV file not found: {quality_csv}")
+                continue
+            
+            self.logger.info(f"Loading quality data from: {quality_csv}")
+            
+            # Find corresponding encoding data CSV in the same directory
+            quality_dir = os.path.dirname(quality_csv)
+            encoding_csv_files = []
+            
+            # Look for _encoding_data.csv files in the same directory
+            for file in os.listdir(quality_dir):
+                if file.endswith('_encoding_data.csv'):
+                    encoding_csv_files.append(os.path.join(quality_dir, file))
+            
+            # Create TestResult from quality CSV
+            test_data = {
+                "quality_csv": quality_csv
+            }
+            
+            if encoding_csv_files:
+                test_data["stats_csv"] = encoding_csv_files
+                self.logger.info(f"Found {len(encoding_csv_files)} encoding data files")
+            
+            # Extract test info from filename or CSV content
+            test_name = "quality_analysis"
+            device_serial = "unknown"
+            
+            # Try to extract info from CSV content
+            try:
+                import pandas as pd
+                df = pd.read_csv(quality_csv)
+                if not df.empty:
+                    # Get unique codecs and devices from the CSV
+                    codecs = df['codec'].unique() if 'codec' in df.columns else ['unknown']
+                    devices = df['serial'].unique() if 'serial' in df.columns else ['unknown']
+                    
+                    # Use the first codec and device for naming
+                    if len(codecs) > 0 and codecs[0] != 'unknown':
+                        test_name = f"quality_analysis_{codecs[0]}"
+                    if len(devices) > 0 and devices[0] != 'unknown':
+                        device_serial = devices[0]
+                        
+            except Exception as e:
+                self.logger.warning(f"Could not extract metadata from {quality_csv}: {e}")
+            
+            test_result = TestResult(
+                test_name=test_name,
+                device_serial=device_serial,
+                success=True,
+                duration=0,  # Unknown duration for existing results
+                output_files=[],  # No JSON files for direct CSV input
+                test_data=test_data,
+                error_message=None,
+                quality_metrics={}
+            )
+            test_results.append(test_result)
+            self.logger.info(f"Loaded quality data: {test_name} on {device_serial}")
+        
+        return test_results
+    
     def _prepare_sources(self) -> List[str]:
         """Prepare video sources for testing"""
         # If input files are explicitly provided, use only those
@@ -1167,6 +1244,10 @@ def get_options(argv):
         "--mediastore", type=str, default="_mediastore",
         help="Directory for storing reference videos and media files (default: _mediastore)"
     )
+    parser.add_argument(
+        "--quality-data", type=str,
+        help="Comma-separated list of quality CSV files to analyze (alternative to --workdir)"
+    )
     
     options = parser.parse_args(argv[1:])
     return options
@@ -1176,12 +1257,17 @@ def main(argv):
     """Main entry point"""
     options = get_options(argv)
     
-    # Create timestamped workdir if none provided
-    if options.workdir is None:
+    # Create timestamped workdir if none provided and not using quality_data
+    if options.workdir is None and not options.quality_data:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         options.workdir = os.path.join(tempfile.gettempdir(), f"ava_tests_{timestamp}")
 
+    # Parse quality_data if provided
+    quality_data = []
+    if options.quality_data:
+        quality_data = [f.strip() for f in options.quality_data.split(',') if f.strip()]
+    
     # Create configuration
     config = TestConfig(
         debug=options.debug,
@@ -1197,7 +1283,8 @@ def main(argv):
         video_duration=options.video_duration,
         mediastore=options.mediastore,
         use_yuv_encoding=options.use_yuv_encoding,
-        enable_device_decode=not options.disable_device_decode
+        enable_device_decode=not options.disable_device_decode,
+        quality_data=quality_data
     )
     
     # Handle special commands
@@ -1210,8 +1297,13 @@ def main(argv):
         # Generate reports from existing test data
         integrated_runner = IntegratedTestRunner(config)
         
+        # If using quality_data, skip workdir validation
+        if config.quality_data:
+            integrated_runner.generate_reports_only()
+            return
+        
         # If workdir doesn't exist, try to find existing test data
-        if not os.path.exists(config.workdir):
+        if config.workdir and not os.path.exists(config.workdir):
             print(f"Workdir does not exist: {config.workdir}")
             print("Searching for existing test data...")
             
