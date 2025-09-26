@@ -25,7 +25,6 @@ from typing import Dict, List, Any, Optional
 import logging
 
 # Import our modules
-from .ava_sources import VideoSourceGenerator
 from .ava_quality import QualityAssessment
 from .ava_report import ReportGenerator, TestResult as ReportTestResult
 
@@ -62,7 +61,6 @@ class TestConfig:
     output_dir: Optional[str] = None
     workdir: Optional[str] = None
     max_workers: int = 1
-    video_duration: float = 10.0
     use_yuv_encoding: bool = False
     enable_device_decode: bool = True
     mediastore: str = "_mediastore"
@@ -470,7 +468,6 @@ class TestRunner:
                 test_data = {}
             
             # Add configuration options from config
-            test_data["video_duration"] = self.config.video_duration
             test_data["use_yuv_encoding"] = self.config.use_yuv_encoding
             test_data["enable_device_decode"] = self.config.enable_device_decode
             test_data["mediastore"] = mediastore
@@ -570,12 +567,11 @@ class TestRunner:
 
 
 class IntegratedTestRunner:
-    """Integrated test runner with source generation, quality assessment, and reporting"""
+    """Integrated test runner with quality assessment and reporting"""
     
     def __init__(self, config: TestConfig):
         self.config = config
         self.test_runner = TestRunner(config)
-        self.source_generator = VideoSourceGenerator(debug=config.debug > 0)
         self.quality_assessor = QualityAssessment(debug=config.debug > 0)
         self.report_generator = ReportGenerator(debug=config.debug > 0)
         self.logger = self._setup_logging()
@@ -617,32 +613,6 @@ class IntegratedTestRunner:
         
         return test_results, reports
     
-    def generate_reports_only(self):
-        """Generate reports from existing test data without running new tests"""
-        self.logger.info("Generating reports from existing test data")
-        
-        # Step 1: Load test results from workdir or quality_data
-        if self.config.quality_data:
-            test_results = self._load_test_results_from_quality_data()
-        else:
-            test_results = self._load_existing_test_results()
-        
-        if not test_results:
-            self.logger.error("No test results found")
-            return
-        
-        # Step 2: Run quality assessment on existing JSON files
-        self.logger.info("Step 2: Running quality assessment on existing test data")
-        quality_results = self._run_quality_assessment_on_existing(test_results)
-        
-        # Step 3: Generate reports
-        self.logger.info("Step 3: Generating reports")
-        reports = self._generate_reports(test_results, [])
-        
-        # Step 4: Print summary
-        self._print_summary(test_results, reports)
-        
-        return test_results, reports
     
     def run_quality_only(self):
         """Run quality assessment on existing test data without running new tests"""
@@ -1043,20 +1013,10 @@ class IntegratedTestRunner:
             self.logger.info(f"Using provided input files: {self.config.input_files}")
             return self.config.input_files
         
-        sources = []
-        
-        # If specific test requested, generate appropriate sources
-        if self.config.test_name:
-            sources = self.source_generator.get_sources_for_test(self.config.test_name, self.config.video_duration)
-        else:
-            # Generate standard sources with configurable duration
-            sources = self.source_generator.generate_all_standard_sources(self.config.video_duration)
-        
-        # Remove duplicates
-        sources = list(set(sources))
-        
-        self.logger.info(f"Prepared {len(sources)} video sources")
-        return sources
+        # For now, require input files to be provided
+        # In the future, this could scan a directory for video files
+        self.logger.error("No input files provided. Please specify video files using --input-file")
+        return []
     
     def _run_tests(self) -> List[TestResult]:
         """Run the actual tests"""
@@ -1228,20 +1188,12 @@ def get_options(argv):
         help="Maximum number of parallel workers"
     )
     parser.add_argument(
-        "--generate-sources", action="store_true",
-        help="Generate video sources and exit"
-    )
-    parser.add_argument(
-        "--generate-reports-only", action="store_true",
-        help="Generate reports from existing test data without running new tests"
-    )
-    parser.add_argument(
         "--run-quality-only", action="store_true",
         help="Run quality assessment on existing test data without running new tests"
     )
     parser.add_argument(
-        "--video-duration", type=float, default=10.0,
-        help="Duration of generated test videos in seconds (default: 10.0)"
+        "--generate-reports-only", action="store_true",
+        help="Generate reports from existing test data without running new tests"
     )
     parser.add_argument(
         "--use-yuv-encoding", action="store_true", default=False,
@@ -1307,7 +1259,6 @@ def main(argv):
         output_dir=options.output_dir,
         workdir=options.workdir,
         max_workers=options.max_workers,
-        video_duration=options.video_duration,
         mediastore=options.mediastore,
         use_yuv_encoding=options.use_yuv_encoding,
         enable_device_decode=not options.disable_device_decode,
@@ -1321,50 +1272,6 @@ def main(argv):
         runner.list_tests()
         return
     
-    if options.generate_reports_only:
-        # Generate reports from existing test data
-        integrated_runner = IntegratedTestRunner(config)
-        
-        # If using quality_data, skip workdir validation
-        if config.quality_data:
-            integrated_runner.generate_reports_only()
-            return
-        
-        # If workdir doesn't exist, try to find existing test data
-        if config.workdir and not os.path.exists(config.workdir):
-            print(f"Workdir does not exist: {config.workdir}")
-            print("Searching for existing test data...")
-            
-            # Search for existing AVA test directories
-            import glob
-            possible_dirs = []
-            
-            # Check common locations
-            search_paths = [
-                "/tmp/ava_tests_*",
-                "/Users/*/tmp/ava_tests_*", 
-                "/Users/*/tmp/workdir",
-                "*/workdir"
-            ]
-            
-            for pattern in search_paths:
-                possible_dirs.extend(glob.glob(pattern))
-            
-            if possible_dirs:
-                print("Found existing test data in:")
-                for i, dir_path in enumerate(possible_dirs):
-                    if os.path.exists(dir_path):
-                        print(f"  {i+1}. {dir_path}")
-                
-                print(f"\nTo use existing data, run with: --workdir <path>")
-                print(f"Example: --workdir {possible_dirs[0]}")
-                return
-            else:
-                print("No existing test data found.")
-                return
-        
-        integrated_runner.generate_reports_only()
-        return
     
     if options.run_quality_only:
         # Run quality assessment on existing test data
@@ -1372,13 +1279,31 @@ def main(argv):
         integrated_runner.run_quality_only()
         return
     
-    if options.generate_sources:
-        generator = VideoSourceGenerator(debug=config.debug > 0)
-        sources = generator.generate_all_standard_sources(duration=options.video_duration)
-        print(f"Generated {len(sources)} video sources")
-        for source in sources:
-            print(f"  - {source}")
+    if options.generate_reports_only:
+        # Generate reports from existing test data
+        integrated_runner = IntegratedTestRunner(config)
+        
+        # Load existing test results
+        if config.quality_data:
+            test_results = integrated_runner._load_test_results_from_quality_data()
+        else:
+            test_results = integrated_runner._load_existing_test_results()
+        
+        if not test_results:
+            print("❌ No test results found. Please run tests first or specify a valid workdir.")
+            return
+        
+        # Generate reports
+        from .ava_report import ReportGenerator
+        report_generator = ReportGenerator(debug=config.debug > 0)
+        reports = report_generator.generate_comprehensive_report(test_results)
+        
+        print(f"📊 Reports generated:")
+        for report_type, report_path in reports.items():
+            print(f"   {report_type}: {report_path}")
+        
         return
+    
     
     # Create integrated test runner
     runner = IntegratedTestRunner(config)

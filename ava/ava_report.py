@@ -87,8 +87,223 @@ class ReportGenerator:
             
         return logger
     
-    def create_quality_plots_from_csv(self, test_results: List[TestResult]) -> go.Figure:
-        """Create quality plots directly from CSV files"""
+    def create_quality_plots_with_both_bitrates(self, test_results: List[TestResult]) -> Tuple[go.Figure, Dict[str, Any]]:
+        """Create quality plots with both calculated and target bitrate data for dynamic switching
+            
+        Returns:
+            Tuple of (figure, data_dict) where data_dict contains both bitrate datasets
+        """
+        # Create subplots for different quality metrics
+        fig = make_subplots(
+            rows=3, cols=2,
+            subplot_titles=("VMAF vs Bitrate", "PSNR vs Bitrate", 
+                          "SSIM vs Bitrate", "QP Statistics",
+                          "Target vs Actual Bitrate", "Bitrate Accuracy"),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}]]
+        )
+        
+        # Read all quality CSV files directly
+        all_data = []
+        for result in test_results:
+            if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
+                csv_file = result.test_data['quality_csv']
+                if os.path.exists(csv_file):
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if not df.empty:
+                            # Add device info to the dataframe
+                            df['device_serial'] = result.device_serial
+                            df['test_name'] = result.test_name
+                            
+                            # Apply custom labels if this is a custom labeled test
+                            df = self._apply_custom_labels_to_dataframe(df, result)
+                            
+                            all_data.append(df)
+                    except pd.errors.EmptyDataError:
+                        # Skip empty CSV files (e.g., when quality analysis fails)
+                        print(f"Warning: Skipping empty quality CSV file: {csv_file}")
+                        continue
+        
+        if not all_data:
+            # Add a message when no quality data is available
+            fig.add_annotation(
+                text="No quality data available. Quality analysis requires valid encoded video files.",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=16, color="red")
+            )
+            return fig, {}
+            
+        # Combine all data
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Check if we have the required columns
+        has_calculated = 'calculated_bitrate_bps' in combined_df.columns
+        has_target = 'bitrate_bps' in combined_df.columns
+        has_quality = 'vmaf_mean' in combined_df.columns
+        
+        if not has_quality or (not has_calculated and not has_target):
+            # Add a message when no quality data is available
+            fig.add_annotation(
+                text="No quality data available. Quality analysis requires valid encoded video files.",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=16, color="red")
+            )
+            return fig, {}
+        
+        # Prepare data for both bitrate modes
+        data_dict = {
+            'calculated': self._prepare_bitrate_data(combined_df, 'calculated_bitrate_bps', 'Calculated Bitrate (kbps)'),
+            'target': self._prepare_bitrate_data(combined_df, 'bitrate_bps', 'Target Bitrate (kbps)')
+        }
+        
+        # Create initial plots with calculated bitrate (default)
+        self._add_quality_plots_to_figure(fig, data_dict['calculated'])
+        
+        # Update layout
+        fig.update_layout(
+            title="Quality Metrics Analysis (Direct from CSV)",
+            height=1200,
+            showlegend=True,
+            autosize=True,
+            dragmode='zoom',
+            hovermode='x unified'
+        )
+        
+        # Update axes labels
+        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=1, col=1)
+        fig.update_yaxes(title_text="VMAF", row=1, col=1)
+        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=1, col=2)
+        fig.update_yaxes(title_text="PSNR (dB)", row=1, col=2)
+        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=2, col=1)
+        fig.update_yaxes(title_text="SSIM", row=2, col=1)
+        fig.update_xaxes(title_text="Target Bitrate (kbps)", row=3, col=1)
+        fig.update_yaxes(title_text="Actual Bitrate (kbps)", row=3, col=1)
+        fig.update_xaxes(title_text="Target Bitrate (kbps)", row=3, col=2)
+        fig.update_yaxes(title_text="Bitrate Accuracy (%)", row=3, col=2)
+        
+        return fig, data_dict
+    
+    def _prepare_bitrate_data(self, combined_df: pd.DataFrame, bitrate_col: str, bitrate_label: str) -> Dict[str, Any]:
+        """Prepare data for a specific bitrate mode"""
+        if bitrate_col not in combined_df.columns:
+            return {'traces': [], 'bitrate_label': bitrate_label}
+        
+        traces = []
+        
+        # VMAF plot data
+        if 'vmaf_mean' in combined_df.columns:
+            for codec in combined_df['codec'].unique():
+                codec_data = combined_df[combined_df['codec'] == codec].sort_values(bitrate_col)
+                for device in codec_data['device_serial'].unique():
+                    device_data = codec_data[codec_data['device_serial'] == device]
+                    model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                    
+                    # Get consistent color and line style
+                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
+                    codec_type = self._get_codec_type(codec)
+                    line_style = self._get_codec_line_style(codec_type)
+                    trace_name = self._get_trace_name(codec, model)
+                    
+                    traces.append({
+                        'type': 'scatter',
+                        'x': (device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
+                        'y': device_data['vmaf_mean'].tolist(),
+                        'mode': 'markers+lines',
+                        'name': trace_name,
+                        'line': {'color': color, 'dash': line_style, 'width': 2},
+                        'marker': {'size': 6},
+                        'legendgroup': trace_name,
+                        'showlegend': True,
+                        'row': 1,
+                        'col': 1
+                    })
+        
+        # PSNR plot data
+        if 'psnr' in combined_df.columns:
+            valid_psnr_data = combined_df[combined_df['psnr'] != -1]
+            if not valid_psnr_data.empty:
+                for codec in valid_psnr_data['codec'].unique():
+                    codec_data = valid_psnr_data[valid_psnr_data['codec'] == codec].sort_values(bitrate_col)
+                    for device in codec_data['device_serial'].unique():
+                        device_data = codec_data[codec_data['device_serial'] == device]
+                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                        
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
+                        codec_type = self._get_codec_type(codec)
+                        line_style = self._get_codec_line_style(codec_type)
+                        trace_name = self._get_trace_name(codec, model)
+                        
+                        traces.append({
+                            'type': 'scatter',
+                            'x': (device_data[bitrate_col] / 1000).tolist(),
+                            'y': device_data['psnr'].tolist(),
+                            'mode': 'markers+lines',
+                            'name': trace_name,
+                            'line': {'color': color, 'dash': line_style, 'width': 2},
+                            'marker': {'size': 6},
+                            'legendgroup': trace_name,
+                            'showlegend': False,
+                            'row': 1,
+                            'col': 2
+                        })
+        
+        # SSIM plot data
+        if 'ssim' in combined_df.columns:
+            valid_ssim_data = combined_df[combined_df['ssim'] != -1]
+            if not valid_ssim_data.empty:
+                for codec in valid_ssim_data['codec'].unique():
+                    codec_data = valid_ssim_data[valid_ssim_data['codec'] == codec].sort_values(bitrate_col)
+                    for device in codec_data['device_serial'].unique():
+                        device_data = codec_data[codec_data['device_serial'] == device]
+                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                        
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
+                        codec_type = self._get_codec_type(codec)
+                        line_style = self._get_codec_line_style(codec_type)
+                        trace_name = self._get_trace_name(codec, model)
+                        
+                        traces.append({
+                            'type': 'scatter',
+                            'x': (device_data[bitrate_col] / 1000).tolist(),
+                            'y': device_data['ssim'].tolist(),
+                            'mode': 'markers+lines',
+                            'name': trace_name,
+                            'line': {'color': color, 'dash': line_style, 'width': 2},
+                            'marker': {'size': 6},
+                            'legendgroup': trace_name,
+                            'showlegend': False,
+                            'row': 2,
+                            'col': 1
+                        })
+        
+        return {
+            'traces': traces,
+            'bitrate_label': bitrate_label
+        }
+    
+    def _add_quality_plots_to_figure(self, fig: go.Figure, data: Dict[str, Any]) -> None:
+        """Add quality plots to figure using prepared data"""
+        for trace_data in data['traces']:
+            # Extract row and col for positioning
+            row = trace_data.pop('row', 1)
+            col = trace_data.pop('col', 1)
+            
+            fig.add_trace(
+                go.Scatter(**trace_data),
+                row=row, col=col
+            )
+    
+    def create_quality_plots_from_csv(self, test_results: List[TestResult], bitrate_mode: str = "calculated") -> go.Figure:
+        """Create quality plots directly from CSV files
+        
+        Args:
+            test_results: List of test results
+            bitrate_mode: "calculated" for calculated_bitrate_bps or "target" for bitrate_bps
+        """
             
         # Create subplots for different quality metrics
         fig = make_subplots(
@@ -132,25 +347,33 @@ class ReportGenerator:
                 showarrow=False, font=dict(size=16, color="red")
             )
             return fig
-            
+        
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
         
-        # Check if we have quality data columns
-        if 'vmaf_mean' not in combined_df.columns or 'calculated_bitrate_bps' not in combined_df.columns:
-            # Add a message when no quality data is available
+        # Determine which bitrate column to use
+        if bitrate_mode == "target":
+            bitrate_col = "bitrate_bps"
+            bitrate_label = "Target Bitrate (kbps)"
+        else:  # calculated
+            bitrate_col = "calculated_bitrate_bps"
+            bitrate_label = "Calculated Bitrate (kbps)"
+        
+        # Check if we have the required bitrate column
+        if bitrate_col not in combined_df.columns:
+            # Add a message when the required bitrate column is not available
             fig.add_annotation(
-                text="No quality data available. Quality analysis requires valid encoded video files.",
+                text=f"No {bitrate_col} data available. Please ensure quality analysis includes bitrate calculation.",
                 xref="paper", yref="paper",
                 x=0.5, y=0.5, xanchor="center", yanchor="middle",
                 showarrow=False, font=dict(size=16, color="red")
             )
             return fig
         
-        # VMAF plot - use calculated_bitrate_bps for X-axis
-        if 'vmaf_mean' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
+        # VMAF plot - use selected bitrate column for X-axis
+        if 'vmaf_mean' in combined_df.columns and bitrate_col in combined_df.columns:
             for codec in combined_df['codec'].unique():
-                codec_data = combined_df[combined_df['codec'] == codec].sort_values('calculated_bitrate_bps')
+                codec_data = combined_df[combined_df['codec'] == codec].sort_values(bitrate_col)
                 for device in codec_data['device_serial'].unique():
                     device_data = codec_data[codec_data['device_serial'] == device]
                     model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
@@ -164,7 +387,7 @@ class ReportGenerator:
                     
                 fig.add_trace(
                     go.Scatter(
-                            x=(device_data['calculated_bitrate_bps'] / 1000).tolist(),  # Convert to kbps
+                            x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
                             y=device_data['vmaf_mean'].tolist(),
                         mode='markers+lines',
                             name=trace_name,
@@ -176,13 +399,13 @@ class ReportGenerator:
                     row=1, col=1
                 )
         
-        # PSNR plot - use calculated_bitrate_bps for X-axis
-        if 'psnr' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
+        # PSNR plot - use selected bitrate column for X-axis
+        if 'psnr' in combined_df.columns and bitrate_col in combined_df.columns:
             # Filter out invalid PSNR values
             valid_psnr_data = combined_df[combined_df['psnr'] != -1]
             if not valid_psnr_data.empty:
                 for codec in valid_psnr_data['codec'].unique():
-                    codec_data = valid_psnr_data[valid_psnr_data['codec'] == codec].sort_values('calculated_bitrate_bps')
+                    codec_data = valid_psnr_data[valid_psnr_data['codec'] == codec].sort_values(bitrate_col)
                     for device in codec_data['device_serial'].unique():
                         device_data = codec_data[codec_data['device_serial'] == device]
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
@@ -196,7 +419,7 @@ class ReportGenerator:
                         
                         fig.add_trace(
                             go.Scatter(
-                                x=(device_data['calculated_bitrate_bps'] / 1000).tolist(),  # Convert to kbps
+                                x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
                                 y=device_data['psnr'].tolist(),
                                 mode='markers+lines',
                                 name=trace_name,
@@ -208,13 +431,13 @@ class ReportGenerator:
                             row=1, col=2
                         )
         
-        # SSIM plot - use calculated_bitrate_bps for X-axis
-        if 'ssim' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
+        # SSIM plot - use selected bitrate column for X-axis
+        if 'ssim' in combined_df.columns and bitrate_col in combined_df.columns:
             # Filter out invalid SSIM values
             valid_ssim_data = combined_df[combined_df['ssim'] != -1]
             if not valid_ssim_data.empty:
                 for codec in valid_ssim_data['codec'].unique():
-                    codec_data = valid_ssim_data[valid_ssim_data['codec'] == codec].sort_values('calculated_bitrate_bps')
+                    codec_data = valid_ssim_data[valid_ssim_data['codec'] == codec].sort_values(bitrate_col)
                     for device in codec_data['device_serial'].unique():
                         device_data = codec_data[codec_data['device_serial'] == device]
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
@@ -228,7 +451,7 @@ class ReportGenerator:
                         
                         fig.add_trace(
                             go.Scatter(
-                                x=(device_data['calculated_bitrate_bps'] / 1000).tolist(),  # Convert to kbps
+                                x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
                                 y=device_data['ssim'].tolist(),
                                 mode='markers+lines',
                                 name=trace_name,
@@ -314,11 +537,11 @@ class ReportGenerator:
         )
         
         # Update axes labels
-        fig.update_xaxes(title_text="Actual Bitrate (kbps)", row=1, col=1)
+        fig.update_xaxes(title_text=bitrate_label, row=1, col=1)
         fig.update_yaxes(title_text="VMAF", row=1, col=1)
-        fig.update_xaxes(title_text="Actual Bitrate (kbps)", row=1, col=2)
+        fig.update_xaxes(title_text=bitrate_label, row=1, col=2)
         fig.update_yaxes(title_text="PSNR (dB)", row=1, col=2)
-        fig.update_xaxes(title_text="Actual Bitrate (kbps)", row=2, col=1)
+        fig.update_xaxes(title_text=bitrate_label, row=2, col=1)
         fig.update_yaxes(title_text="SSIM", row=2, col=1)
         fig.update_xaxes(title_text="Target Bitrate (kbps)", row=3, col=1)
         fig.update_yaxes(title_text="Actual Bitrate (kbps)", row=3, col=1)
@@ -822,13 +1045,8 @@ class ReportGenerator:
     def create_comparison_plots(self, test_results: List[TestResult], reference_device: str = None) -> go.Figure:
         """Create comparison plots with delta analysis"""
         
-        # Create subplots for comparison
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=("VMAF Delta Comparison", "SI/TI Complexity Analysis"),
-            specs=[[{"secondary_y": False}],
-                   [{"secondary_y": False}]]
-        )
+        # Create single plot for VMAF delta comparison only
+        fig = go.Figure()
         
         # Read all quality CSV files directly
         all_data = []
@@ -935,49 +1153,14 @@ class ReportGenerator:
                                     marker=dict(size=6),
                                     legendgroup=trace_name,
                                     showlegend=True
-                                ),
-                                row=1, col=1
+                                )
                             )
         
-        # SI/TI Complexity Analysis
-        if 'si_avg' in combined_df.columns and 'ti_avg' in combined_df.columns:
-            # Filter out invalid values
-            valid_data = combined_df[(combined_df['si_avg'] != -1) & (combined_df['ti_avg'] != -1)]
-            
-            if not valid_data.empty:
-                for codec in valid_data['codec'].unique():
-                    codec_data = valid_data[valid_data['codec'] == codec]
-                    for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device]
-                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-        
-                        # Get consistent color and line style
-                        # Use codec name for color when using custom labels, device name otherwise
-                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                        codec_type = self._get_codec_type(codec)
-                        trace_name = self._get_trace_name(codec, model)
-        
-                        fig.add_trace(
-                            go.Scatter(
-                                x=device_data['ti_avg'].tolist(),
-                                y=device_data['si_avg'].tolist(),
-                                mode='markers',
-                                name=trace_name,
-                                marker=dict(size=8, color=color),
-                                hovertemplate=f'<b>{codec} ({model})</b><br>' +
-                                            'TI: %{x}<br>' +
-                                            'SI: %{y}<br>' +
-                                            '<extra></extra>',
-                                legendgroup=trace_name,
-                                showlegend=False
-                            ),
-                            row=2, col=1
-                        )
         
         # Update layout
         fig.update_layout(
-            title="Comparison Analysis",
-            height=800,
+            title="VMAF Delta Comparison",
+            height=600,
             showlegend=True,
             autosize=True,
             dragmode='zoom',
@@ -985,23 +1168,322 @@ class ReportGenerator:
         )
         
         # Update axes labels
-        fig.update_xaxes(title_text="Actual Bitrate (kbps)", row=1, col=1)
-        fig.update_yaxes(title_text="VMAF Delta", row=1, col=1)
-        fig.update_xaxes(title_text="TI (Temporal Information)", row=2, col=1)
-        fig.update_yaxes(title_text="SI (Spatial Information)", row=2, col=1)
+        fig.update_xaxes(title_text="Actual Bitrate (kbps)")
+        fig.update_yaxes(title_text="VMAF Delta")
         
         return fig
     
+    def create_siti_plots(self, test_results: List[TestResult]) -> go.Figure:
+        """Create SI/TI complexity analysis plots with four different visualizations"""
+        
+        # Read all quality CSV files directly
+        all_data = []
+        for result in test_results:
+            if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
+                csv_file = result.test_data['quality_csv']
+                if os.path.exists(csv_file):
+                    try:
+                        df = pd.read_csv(csv_file)
+                        if not df.empty:
+                            # Add device info to the dataframe
+                            df['device_serial'] = result.device_serial
+                            df['test_name'] = result.test_name
+                            
+                            # Apply custom labels if this is a custom labeled test
+                            df = self._apply_custom_labels_to_dataframe(df, result)
+                            
+                            all_data.append(df)
+                    except pd.errors.EmptyDataError:
+                        # Skip empty CSV files (e.g., when quality analysis fails)
+                        print(f"Warning: Skipping empty quality CSV file: {csv_file}")
+                        continue
+        
+        if not all_data:
+            # Create empty plot if no data
+            fig = go.Figure()
+            fig.add_annotation(
+                text="No SI/TI data available",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=16)
+            )
+            fig.update_layout(
+                title="SI/TI Complexity Analysis",
+                height=600,
+                showlegend=True
+            )
+            return fig
+        
+        # Combine all data
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        # Create subplots with 2x2 layout
+        from plotly.subplots import make_subplots
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=("SI vs TI Distribution", "SI Distribution", "TI Distribution", "Source Count by Complexity Level"),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}]]
+        )
+        
+        # SI/TI Complexity Analysis
+        if 'si_avg' in combined_df.columns and 'ti_avg' in combined_df.columns:
+            # Filter out invalid values
+            valid_data = combined_df[(combined_df['si_avg'] != -1) & (combined_df['ti_avg'] != -1)]
+            
+            if not valid_data.empty:
+                # Collect data for analysis
+                si_values = []
+                ti_values = []
+                source_info = []
+                
+                for codec in valid_data['codec'].unique():
+                    codec_data = valid_data[valid_data['codec'] == codec]
+                    for device in codec_data['device_serial'].unique():
+                        device_data = codec_data[codec_data['device_serial'] == device]
+                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                        
+                        # Get consistent color and line style
+                        # Use codec name for color when using custom labels, device name otherwise
+                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
+                        codec_type = self._get_codec_type(codec)
+                        trace_name = self._get_trace_name(codec, model)
+                        
+                        # Collect data points
+                        for _, row in device_data.iterrows():
+                            si_values.append(row['si_avg'])
+                            ti_values.append(row['ti_avg'])
+                            source_info.append({
+                                'codec': codec,
+                                'model': model,
+                                'trace_name': trace_name,
+                                'color': color
+                            })
+                
+                # 1. SI vs TI Distribution (top-left)
+                if si_values and ti_values:
+                    # Group by trace for coloring
+                    trace_data = {}
+                    for i, (si, ti, info) in enumerate(zip(si_values, ti_values, source_info)):
+                        trace_name = info['trace_name']
+                        if trace_name not in trace_data:
+                            trace_data[trace_name] = {'si': [], 'ti': [], 'color': info['color']}
+                        trace_data[trace_name]['si'].append(si)
+                        trace_data[trace_name]['ti'].append(ti)
+                    
+                    for trace_name, data in trace_data.items():
+                        fig.add_trace(
+                            go.Scatter(
+                                x=data['ti'],
+                                y=data['si'],
+                                mode='markers',
+                                name=trace_name,
+                                marker=dict(size=8, color=data['color']),
+                                hovertemplate=f'<b>{trace_name}</b><br>' +
+                                            'TI: %{{x}}<br>' +
+                                            'SI: %{{y}}<br>' +
+                                            '<extra></extra>',
+                                legendgroup=trace_name,
+                                showlegend=True
+                            ),
+                            row=1, col=1
+                        )
+                    
+                    # Add grid lines to show complexity levels (5x5 grid)
+                    # SI levels: 0, 20, 40, 60, 80, 100, 120
+                    for si_level in [0, 20, 40, 60, 80, 100, 120]:
+                        fig.add_hline(
+                            y=si_level,
+                            line_dash="dash",
+                            line_color="red",
+                            opacity=0.3,
+                            row=1, col=1
+                        )
+                    
+                    # TI levels: 0, 20, 40, 60, 80, 100
+                    for ti_level in [0, 20, 40, 60, 80, 100]:
+                        fig.add_vline(
+                            x=ti_level,
+                            line_dash="dash",
+                            line_color="red",
+                            opacity=0.3,
+                            row=1, col=1
+                        )
+                    
+                    # 2. SI Distribution (top-right)
+                    fig.add_trace(
+                        go.Histogram(
+                            x=si_values,
+                            name='SI Distribution',
+                            marker_color='lightblue',
+                            opacity=0.7
+                        ),
+                        row=1, col=2
+                    )
+                    
+                    # 3. TI Distribution (bottom-left)
+                    fig.add_trace(
+                        go.Histogram(
+                            x=ti_values,
+                            name='TI Distribution',
+                            marker_color='lightcoral',
+                            opacity=0.7
+                        ),
+                        row=2, col=1
+                    )
+                    
+                    # 4. Source Count by Complexity Level (bottom-right)
+                    # Categorize sources by complexity levels
+                    complexity_counts = {}
+                    for si, ti in zip(si_values, ti_values):
+                        # Categorize SI
+                        if si < 20:
+                            si_cat = 'vl'
+                        elif si < 40:
+                            si_cat = 'l'
+                        elif si < 60:
+                            si_cat = 'm'
+                        elif si < 80:
+                            si_cat = 'h'
+                        else:
+                            si_cat = 'vh'
+                        
+                        # Categorize TI
+                        if ti < 20:
+                            ti_cat = 'vl'
+                        elif ti < 40:
+                            ti_cat = 'l'
+                        elif ti < 60:
+                            ti_cat = 'm'
+                        elif ti < 80:
+                            ti_cat = 'h'
+                        else:
+                            ti_cat = 'vh'
+                        
+                        key = f"{si_cat}_{ti_cat}"
+                        complexity_counts[key] = complexity_counts.get(key, 0) + 1
+                    
+                    # Create heatmap data
+                    si_categories = ['vl', 'l', 'm', 'h', 'vh']
+                    ti_categories = ['vl', 'l', 'm', 'h', 'vh']
+                    
+                    heatmap_data = []
+                    for si_cat in si_categories:
+                        row = []
+                        for ti_cat in ti_categories:
+                            key = f"{si_cat}_{ti_cat}"
+                            row.append(complexity_counts.get(key, 0))
+                        heatmap_data.append(row)
+                    
+                    fig.add_trace(
+                        go.Heatmap(
+                            z=heatmap_data,
+                            x=ti_categories,
+                            y=si_categories,
+                            colorscale='Viridis',
+                            showscale=True,
+                            name='Source Count'
+                        ),
+                        row=2, col=2
+                    )
+        
+        # Update layout
+        fig.update_layout(
+            title="SI/TI Complexity Analysis - Test Results Distribution",
+            height=800,
+            showlegend=True,
+            autosize=True,
+            dragmode='zoom',
+            hovermode='closest'
+        )
+        
+        # Update axes labels and ranges
+        fig.update_xaxes(title_text="TI (Temporal Information)", range=[0, 120], row=1, col=1)
+        fig.update_yaxes(title_text="SI (Spatial Information)", range=[0, 120], row=1, col=1)
+        fig.update_xaxes(title_text="SI Values", row=1, col=2)
+        fig.update_yaxes(title_text="Frequency", row=1, col=2)
+        fig.update_xaxes(title_text="TI Values", row=2, col=1)
+        fig.update_yaxes(title_text="Frequency", row=2, col=1)
+        fig.update_xaxes(title_text="Temporal Complexity", row=2, col=2)
+        fig.update_yaxes(title_text="Spatial Complexity", row=2, col=2)
+        
+        return fig
+    
+    def _calculate_si_ti(self, video_file: str) -> Tuple[float, float]:
+        """Calculate SI/TI values for a video file using FFmpeg"""
+        import tempfile
+        import subprocess
+        
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".txt", prefix="siti.", delete=False) as tfo:
+                tf = tfo.name
+            
+            # Use FFmpeg to calculate SI/TI
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y",
+                "-i", video_file,
+                "-filter_complex", "siti=print_summary=1",
+                "-f", "null", "-"
+            ]
+            
+            with open(tf, "w") as f:
+                subprocess.run(cmd, stdout=f, stderr=f, check=True)
+            
+            # Parse the output
+            si_avg = -1.0
+            ti_avg = -1.0
+            
+            with open(tf, "r") as f:
+                lines = f.readlines()
+                spatial = True
+                for line in lines:
+                    line = line.lower().strip()
+                    if "spatial" in line:
+                        spatial = True
+                        continue
+                    if "temporal" in line:
+                        spatial = False
+                        continue
+                    if "average:" in line:
+                        try:
+                            value = float(line.split(":")[-1].strip())
+                            if spatial:
+                                si_avg = value
+                            else:
+                                ti_avg = value
+                        except (ValueError, IndexError):
+                            continue
+            
+            # Clean up temp file
+            os.unlink(tf)
+            
+            return si_avg, ti_avg
+            
+        except Exception as e:
+            print(f"Error calculating SI/TI for {video_file}: {e}")
+            return -1.0, -1.0
+    
     def generate_interactive_report(self, test_results: List[TestResult], 
-                                  stats_files: List[str] = None) -> str:
-        """Generate an interactive HTML report"""
+                                  stats_files: List[str] = None, bitrate_mode: str = "calculated") -> str:
+        """Generate an interactive HTML report
+        
+        Args:
+            test_results: List of test results
+            stats_files: Optional list of stats files
+            bitrate_mode: "calculated" for calculated_bitrate_bps or "target" for bitrate_bps
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = self.output_dir / f"ava_report_{timestamp}.html"
         
-        # Create all plots
-        quality_fig = self.create_quality_plots_from_csv(test_results)
+        # Create plots for both bitrate modes
+        quality_fig_calculated = self.create_quality_plots_from_csv(test_results, "calculated")
+        quality_fig_target = self.create_quality_plots_from_csv(test_results, "target")
+        
+        # Use the requested mode as default
+        quality_fig = quality_fig_calculated if bitrate_mode == "calculated" else quality_fig_target
         performance_fig = self.create_performance_plots(test_results)
         comparison_fig = self.create_comparison_plots(test_results)
+        siti_fig = self.create_siti_plots(test_results)
         
         # For dynamic BD-Rate, we'll generate plots in JavaScript
         # No need to pre-calculate all combinations
@@ -1051,10 +1533,23 @@ class ReportGenerator:
             <h1>AVA Quality Metrics Report</h1>
             <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
             
+            <!-- Bitrate Mode Toggle -->
+            <div style="margin: 20px 0; padding: 10px; background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 5px;">
+                <label for="bitrateMode" style="font-weight: bold; margin-right: 10px;">Bitrate Mode:</label>
+                <select id="bitrateMode" onchange="toggleBitrateMode()" style="padding: 5px; font-size: 14px;">
+                    <option value="calculated">Calculated Bitrate</option>
+                    <option value="target">Target Bitrate</option>
+                </select>
+                <span id="bitrateModeDescription" style="margin-left: 10px; color: #666;">
+                    Shows actual bitrate calculated from encoded video files
+                </span>
+            </div>
+            
             <div class="tab">
                 <button class="tablinks active" onclick="openTab(event, 'Quality')">Quality Metrics</button>
                 <button class="tablinks" onclick="openTab(event, 'Performance')">Performance</button>
                 <button class="tablinks" onclick="openTab(event, 'Comparison')">Comparison</button>
+                <button class="tablinks" onclick="openTab(event, 'SI-TI')">SI/TI Analysis</button>
                 <button class="tablinks" onclick="openTab(event, 'BD-Rate')">BD-Rate Analysis</button>
             </div>
             
@@ -1075,7 +1570,7 @@ class ReportGenerator:
                         </div>
                         <div>
                             <h4>Data Information:</h4>
-                            <div style="background: #e7f3ff; padding: 10px; border-radius: 4px; border-left: 4px solid #2196F3;">
+                            <div id="dataInfoNote" style="background: #e7f3ff; padding: 10px; border-radius: 4px; border-left: 4px solid #2196F3;">
                                 <strong>Note:</strong> VMAF values are plotted against actual achieved bitrates, not target bitrates. 
                                 This automatically accounts for bitrate accuracy differences between devices.
                             </div>
@@ -1153,6 +1648,10 @@ class ReportGenerator:
                 <div id="comparison-plots"></div>
             </div>
             
+            <div id="SI-TI" class="tabcontent">
+                <div id="siti-plots"></div>
+            </div>
+            
             <div id="BD-Rate" class="tabcontent">
                 <div id="bd-rate-content">
                     <p>BD-Rate analysis will be loaded here...</p>
@@ -1161,9 +1660,65 @@ class ReportGenerator:
             
             <script>
                 // Global variables for plot data
-                var qualityData = {quality_fig.to_json()};
+                var qualityDataCalculated = {quality_fig_calculated.to_json()};
+                var qualityDataTarget = {quality_fig_target.to_json()};
+                var qualityData = qualityDataCalculated; // Default to calculated
+                
+                // Get bitrate mode from URL parameter or use default
+                var urlParams = new URLSearchParams(window.location.search);
+                var currentBitrateMode = urlParams.get('bitrate_mode') || '{bitrate_mode}';
+                
+                // Set the dropdown to the correct value based on URL parameter
+                function setBitrateMode() {{
+                    console.log('Setting bitrate mode to:', currentBitrateMode);
+                    var bitrateModeSelect = document.getElementById('bitrateMode');
+                    if (bitrateModeSelect) {{
+                        console.log('Found bitrate select element');
+                        bitrateModeSelect.value = currentBitrateMode;
+                        console.log('Set select value to:', bitrateModeSelect.value);
+                        
+                        // Set the correct dataset based on mode
+                        if (currentBitrateMode === 'target') {{
+                            qualityData = qualityDataTarget;
+                        }} else {{
+                            qualityData = qualityDataCalculated;
+                        }}
+                        
+                        // Update the description text
+                        var description = document.getElementById('bitrateModeDescription');
+                        if (description) {{
+                            if (currentBitrateMode === 'calculated') {{
+                                description.textContent = 'Shows actual bitrate calculated from encoded video files';
+                            }} else {{
+                                description.textContent = 'Shows target bitrate specified for encoding';
+                            }}
+                            console.log('Updated description text');
+                        }}
+                        
+                        // Update the data info note
+                        var note = document.getElementById('dataInfoNote');
+                        if (note) {{
+                            if (currentBitrateMode === 'calculated') {{
+                                note.innerHTML = '<strong>Note:</strong> VMAF values are plotted against actual achieved bitrates, not target bitrates. This automatically accounts for bitrate accuracy differences between devices.';
+                            }} else {{
+                                note.innerHTML = '<strong>Note:</strong> VMAF values are plotted against target bitrates specified for encoding. This shows the intended bitrate vs actual quality relationship.';
+                            }}
+                            console.log('Updated data info note');
+                        }}
+                    }} else {{
+                        console.log('Bitrate select element not found');
+                    }}
+                }}
+                
+                // Try to set immediately, then also on DOM ready
+                setBitrateMode();
+                document.addEventListener('DOMContentLoaded', setBitrateMode);
                 var performanceData = {performance_fig.to_json()};
                 var comparisonData = {comparison_fig.to_json()};
+                var sitiData = {siti_fig.to_json()};
+                
+                // Current bitrate mode
+                var currentBitrateMode = '{bitrate_mode}';
                 
                 function openTab(evt, tabName) {{
                     var i, tabcontent, tablinks;
@@ -1183,15 +1738,88 @@ class ReportGenerator:
                         console.log('🔄 BD-Rate tab clicked, initializing...');
                         initializeBDRate();
                     }}
+                    
+                    // Initialize SI/TI when that tab is clicked
+                    if (tabName === 'SI-TI' && typeof initializeSITI === 'function') {{
+                        console.log('🔄 SI/TI tab clicked, initializing...');
+                        initializeSITI();
+                    }}
+                }}
+                
+                function toggleBitrateMode() {{
+                    var mode = document.getElementById('bitrateMode').value;
+                    var description = document.getElementById('bitrateModeDescription');
+                    var note = document.getElementById('dataInfoNote');
+                    
+                    console.log('Switching to bitrate mode:', mode);
+                    
+                    // Update description
+                    if (mode === 'calculated') {{
+                        description.textContent = 'Shows actual bitrate calculated from encoded video files';
+                        note.innerHTML = '<strong>Note:</strong> VMAF values are plotted against actual achieved bitrates, not target bitrates. This automatically accounts for bitrate accuracy differences between devices.';
+                        qualityData = qualityDataCalculated;
+                    }} else {{
+                        description.textContent = 'Shows target bitrate specified for encoding';
+                        note.innerHTML = '<strong>Note:</strong> VMAF values are plotted against target bitrates specified for encoding. This shows the intended bitrate vs actual quality relationship.';
+                        qualityData = qualityDataTarget;
+                    }}
+                    
+                    // Update the plot dynamically
+                    updateQualityPlots();
+                }}
+                
+                function updateQualityPlots() {{
+                    console.log('Updating quality plots with mode:', currentBitrateMode);
+                    var plotElement = document.getElementById('quality-plots');
+                    if (plotElement && qualityData) {{
+                        Plotly.react(plotElement, qualityData.data, qualityData.layout, {{responsive: true}});
+                        console.log('Quality plots updated successfully');
+                    }} else {{
+                        console.log('Plot element or data not found');
+                    }}
+                }}
+                
+                function regenerateQualityPlots(mode) {{
+                    if (!qualityDataBoth || !qualityDataBoth[mode]) {{
+                        console.log('No data available for mode:', mode);
+                        return;
+                    }}
+                    
+                    var data = qualityDataBoth[mode];
+                    var plotElement = document.getElementById('quality-plots');
+                    
+                    if (!plotElement) {{
+                        console.log('Quality plot element not found');
+                        return;
+                    }}
+                    
+                    // Create new plot data
+                    var newPlotData = {{
+                        data: data.traces,
+                        layout: qualityData.layout,
+                        config: qualityData.config
+                    }};
+                    
+                    // Update x-axis labels
+                    newPlotData.layout.xaxis.title = data.bitrate_label;
+                    newPlotData.layout.xaxis2.title = data.bitrate_label;
+                    newPlotData.layout.xaxis3.title = data.bitrate_label;
+                    
+                    // Regenerate the plot
+                    Plotly.react(plotElement, newPlotData.data, newPlotData.layout, newPlotData.config);
+                    
+                    console.log('Quality plots updated with', mode, 'bitrate mode');
                 }}
                 
                 // Extract unique devices from quality data
                 function extractDevices() {{
                     var devices = new Set();
                     console.log('🔍 EXTRACTING QUALITY DEVICES...');
-                    console.log('Quality data length:', qualityData.data.length);
+                    // Use quality data for device extraction
+                    var qualityDataForDevices = qualityData.data;
+                    console.log('Quality data length:', qualityDataForDevices.length);
                     
-                    qualityData.data.forEach(function(trace, index) {{
+                    qualityDataForDevices.forEach(function(trace, index) {{
                         var name = trace.name;
                         // Only process traces that have a name and match the expected format
                         if (name && typeof name === 'string') {{
@@ -2062,43 +2690,6 @@ class ReportGenerator:
                     return deltas;
                 }}
                 
-                // Store original SI/TI data
-                var originalSiTiData = [];
-                
-                // Extract SI/TI data from comparison plots
-                function extractSiTiData() {{
-                    originalSiTiData = [];
-                    if (comparisonData && comparisonData.data) {{
-                        console.log('Looking for SI/TI data in', comparisonData.data.length, 'traces');
-                        comparisonData.data.forEach(function(trace, index) {{
-                            console.log('Trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis);
-                            // Look for SI/TI traces (they should be in the second subplot)
-                            if (trace.name && trace.x && trace.y && trace.x.length > 0 && trace.y.length > 0) {{
-                                // Check if this looks like SI/TI data (scatter plot with reasonable ranges)
-                                var xValues = trace.x;
-                                var yValues = trace.y;
-                                var isSiTi = xValues.every(function(x) {{ return x >= 0 && x <= 100; }}) && 
-                                            yValues.every(function(y) {{ return y >= 0 && y <= 100; }});
-                                
-                                console.log('Trace', index, 'SI/TI check:', isSiTi, 'x range:', Math.min(...xValues), '-', Math.max(...xValues), 'y range:', Math.min(...yValues), '-', Math.max(...yValues));
-                                
-                                if (isSiTi) {{
-                                    originalSiTiData.push({{
-                                        x: trace.x,
-                                        y: trace.y,
-                                        name: trace.name,
-                                        mode: trace.mode || 'markers',
-                                        marker: trace.marker || {{ size: 8 }},
-                                        hovertemplate: trace.hovertemplate,
-                                        xaxis: 'x2',
-                                        yaxis: 'y2'
-                                    }});
-                                }}
-                            }}
-                        }});
-                    }}
-                    console.log('Extracted SI/TI data:', originalSiTiData);
-                }}
                 
                 // Store original VMAF delta data for reference switching
                 var originalVmafDeltaData = [];
@@ -2204,22 +2795,7 @@ class ReportGenerator:
                         }}
                     }});
                     
-                    // Add SI/TI data to the second subplot
-                    originalSiTiData.forEach(function(siTiTrace) {{
-                        newTraces.push({{
-                            x: siTiTrace.x,
-                            y: siTiTrace.y,
-                            mode: siTiTrace.mode,
-                            name: siTiTrace.name,
-                            type: 'scatter',
-                            marker: siTiTrace.marker,
-                            hovertemplate: siTiTrace.hovertemplate,
-                            xaxis: 'x2',
-                            yaxis: 'y2'
-                        }});
-                    }});
-                    
-                    // Update the plot with both VMAF deltas and SI/TI
+                    // Update the plot with VMAF deltas
                     Plotly.react('comparison-plots', newTraces, comparisonData.layout, {{responsive: true}});
                     
                     // Update the plot title
@@ -2379,9 +2955,6 @@ class ReportGenerator:
                     // Extract raw VMAF data for delta calculations
                     extractRawVmafData();
                     
-                    // Extract SI/TI data for complexity analysis
-                    extractSiTiData();
-                    
                     // Extract original VMAF delta data for reference switching
                     extractOriginalVmafDeltaData();
                     
@@ -2423,6 +2996,35 @@ class ReportGenerator:
                 window.onload = function() {{
                     initializePlots();
                 }};
+                
+                // SI/TI Analysis Functions
+                function initializeSITI() {{
+                    console.log('🔄 SI/TI: Initializing...');
+                    
+                    // Render the initial plot
+                    renderSITIPlot();
+                }}
+                
+                function renderSITIPlot() {{
+                    var container = document.getElementById('siti-plots');
+                    if (!container) {{
+                        console.log('❌ SI/TI: Plot container not found');
+                        return;
+                    }}
+                    
+                    if (!sitiData) {{
+                        console.log('❌ SI/TI: No data available');
+                        container.innerHTML = '<p>No SI/TI data available</p>';
+                        return;
+                    }}
+                    
+                    console.log('🔄 SI/TI: Rendering plot...');
+                    
+                    // Render the plot
+                    Plotly.newPlot('siti-plots', sitiData.data, sitiData.layout, {{responsive: true}});
+                    
+                    console.log('✅ SI/TI: Plot rendered successfully');
+                }}
             </script>
         </body>
         </html>
@@ -3186,7 +3788,13 @@ class ReportGenerator:
         return html_content
 
     def generate_comprehensive_report(self, test_results: List[TestResult], 
-                                    stats_files: List[str] = None) -> Dict[str, str]:
-        """Generate comprehensive reports - wrapper for interactive report"""
-        interactive_report = self.generate_interactive_report(test_results, stats_files)
+                                    stats_files: List[str] = None, bitrate_mode: str = "calculated") -> Dict[str, str]:
+        """Generate comprehensive reports - wrapper for interactive report
+        
+        Args:
+            test_results: List of test results
+            stats_files: Optional list of stats files
+            bitrate_mode: "calculated" for calculated_bitrate_bps or "target" for bitrate_bps
+        """
+        interactive_report = self.generate_interactive_report(test_results, stats_files, bitrate_mode)
         return {"interactive": interactive_report}
