@@ -4055,6 +4055,84 @@ class ReportGenerator:
         
         return html_content
 
+    def generate_csv_only_report(self, quality_csv_files: List[str], 
+                                quality_labels: List[str] = None,
+                                stats_csv_files: List[str] = None,
+                                bitrate_mode: str = "calculated") -> Dict[str, str]:
+        """Generate reports directly from CSV files without requiring quality folders
+        
+        Args:
+            quality_csv_files: List of paths to quality CSV files
+            quality_labels: Optional list of labels for the quality CSV files
+            stats_csv_files: Optional list of paths to stats CSV files
+            bitrate_mode: "calculated" for calculated_bitrate_bps or "target" for bitrate_bps
+            
+        Returns:
+            Dictionary with report type and file path
+        """
+        # Validate input files
+        for csv_file in quality_csv_files:
+            if not os.path.exists(csv_file):
+                raise FileNotFoundError(f"Quality CSV file not found: {csv_file}")
+        
+        if stats_csv_files:
+            for csv_file in stats_csv_files:
+                if not os.path.exists(csv_file):
+                    raise FileNotFoundError(f"Stats CSV file not found: {csv_file}")
+        
+        # Create TestResult objects from CSV files
+        test_results = []
+        
+        for i, quality_csv in enumerate(quality_csv_files):
+            # Create test data dictionary
+            test_data = {"quality_csv": quality_csv}
+            
+            # Add stats CSV if provided
+            if stats_csv_files and i < len(stats_csv_files):
+                test_data["stats_csv"] = [stats_csv_files[i]]
+            
+            # Extract test info from filename or CSV content
+            test_name = "quality_analysis"
+            device_serial = "unknown"
+            
+            # Use custom label if provided
+            if quality_labels and i < len(quality_labels) and quality_labels[i]:
+                test_name = f"quality_analysis_{quality_labels[i]}"
+            else:
+                # Try to extract info from CSV content
+                try:
+                    df = pd.read_csv(quality_csv)
+                    if not df.empty:
+                        # Get unique codecs and devices from the CSV
+                        codecs = df['codec'].unique() if 'codec' in df.columns else ['unknown']
+                        devices = df['serial'].unique() if 'serial' in df.columns else ['unknown']
+                        
+                        # Use the first codec and device for naming
+                        if len(codecs) > 0 and codecs[0] != 'unknown':
+                            test_name = f"quality_analysis_{codecs[0]}"
+                        if len(devices) > 0 and devices[0] != 'unknown':
+                            device_serial = devices[0]
+                            
+                except Exception as e:
+                    self.logger.warning(f"Could not extract metadata from {quality_csv}: {e}")
+            
+            test_result = TestResult(
+                test_name=test_name,
+                device_serial=device_serial,
+                success=True,
+                duration=0,  # Unknown duration for existing results
+                output_files=[],  # No JSON files for direct CSV input
+                test_data=test_data,
+                error_message=None,
+                quality_metrics={}
+            )
+            test_results.append(test_result)
+            self.logger.info(f"Loaded quality data: {test_name} on {device_serial}")
+        
+        # Generate the interactive report
+        interactive_report = self.generate_interactive_report(test_results, None, bitrate_mode)
+        return {"interactive": interactive_report}
+
     def generate_comprehensive_report(self, test_results: List[TestResult], 
                                     stats_files: List[str] = None, bitrate_mode: str = "calculated") -> Dict[str, str]:
         """Generate comprehensive reports - wrapper for interactive report
