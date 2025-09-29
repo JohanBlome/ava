@@ -1295,7 +1295,7 @@ class ReportGenerator:
         
         return fig
     
-    def create_comparison_plots(self, test_results: List[TestResult], reference_device: str = None) -> go.Figure:
+    def create_comparison_plots(self, test_results: List[TestResult], reference_pair: str = None, bitrate_mode: str = "calculated") -> go.Figure:
         """Create comparison plots with delta analysis"""
         
         # Create single plot for VMAF delta comparison only
@@ -1329,8 +1329,14 @@ class ReportGenerator:
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
         
+        # Determine which bitrate column to use
+        if bitrate_mode == "target":
+            bitrate_col = "bitrate_bps"
+        else:  # calculated
+            bitrate_col = "calculated_bitrate_bps"
+        
         # Check if we have quality data
-        if 'vmaf_mean' not in combined_df.columns or 'calculated_bitrate_bps' not in combined_df.columns:
+        if 'vmaf_mean' not in combined_df.columns or bitrate_col not in combined_df.columns:
             # Add a message when no quality data is available
             fig.add_annotation(
                 text="No quality data available. Quality analysis requires valid encoded video files.",
@@ -1341,24 +1347,29 @@ class ReportGenerator:
             return fig
         
         # VMAF Delta Comparison
-        if 'vmaf_mean' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
+        if 'vmaf_mean' in combined_df.columns and bitrate_col in combined_df.columns:
             # Choose reference based on selection or first available
             reference_data = None
-            if reference_device:
-                # Find reference data for selected device
-                for codec in combined_df['codec'].unique():
-                    codec_data = combined_df[combined_df['codec'] == codec]
-                    device_data = codec_data[codec_data['device_serial'] == reference_device].sort_values('calculated_bitrate_bps')
+            if reference_pair:
+                # Parse the reference pair (format: "codec (device)")
+                import re
+                match = re.match(r'([^(]+)\s*\(([^)]+)\)', reference_pair)
+                if match:
+                    ref_codec = match.group(1).strip()
+                    ref_device = match.group(2).strip()
+                    
+                    # Find reference data for selected codec-device pair
+                    codec_data = combined_df[combined_df['codec'] == ref_codec]
+                    device_data = codec_data[codec_data['device_serial'] == ref_device].sort_values(bitrate_col)
                     if len(device_data) >= 2:
                         reference_data = device_data
-                        break
             
             # Fallback to first available if no reference selected or found
             if reference_data is None:
                 for codec in combined_df['codec'].unique():
                     codec_data = combined_df[combined_df['codec'] == codec]
                     for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device].sort_values('calculated_bitrate_bps')
+                        device_data = codec_data[codec_data['device_serial'] == device].sort_values(bitrate_col)
                         if len(device_data) >= 2:
                             reference_data = device_data
                             break
@@ -1367,22 +1378,51 @@ class ReportGenerator:
             
             if reference_data is not None:
                 # Interpolate reference curve
-                ref_bitrates = reference_data['calculated_bitrate_bps'].values
+                ref_bitrates = reference_data[bitrate_col].values
                 ref_vmaf = reference_data['vmaf_mean'].values
+                
+                # Add the reference trace itself (shows as 0 delta)
+                ref_codec = reference_data['codec'].iloc[0]
+                ref_device = reference_data['device_serial'].iloc[0]
+                ref_model = reference_data['model'].iloc[0] if 'model' in reference_data.columns else ref_device
+                
+                # Get consistent color and line style for reference
+                color = self._get_device_color(ref_codec) if self._is_custom_labeled_codec(ref_codec) else self._get_device_color(ref_model)
+                codec_type = self._get_codec_type(ref_codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = self._get_trace_name(ref_codec, ref_model)
+                
+                # Add reference trace (0 delta)
+                fig.add_trace(
+                    go.Scatter(
+                        x=(ref_bitrates / 1000).tolist(),
+                        y=np.zeros_like(ref_bitrates).tolist(),  # 0 delta for reference
+                        mode='markers+lines',
+                        name=trace_name,
+                        line=dict(color=color, dash=line_style, width=2),
+                        marker=dict(size=6),
+                        legendgroup=trace_name,
+                        showlegend=True
+                    )
+                )
                 
                 # Create interpolation function
                 ref_interp = np.interp
                 
-                # Compare all other combinations
+                # Compare all other combinations (skip the reference)
                 for codec in combined_df['codec'].unique():
                     codec_data = combined_df[combined_df['codec'] == codec]
                     for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device].sort_values('calculated_bitrate_bps')
+                        device_data = codec_data[codec_data['device_serial'] == device].sort_values(bitrate_col)
                         model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+                        
+                        # Skip the reference combination (already added above)
+                        if (codec == ref_codec and device == ref_device):
+                            continue
                         
                         if len(device_data) >= 2:
                             # Calculate delta
-                            bitrates = device_data['calculated_bitrate_bps'].values
+                            bitrates = device_data[bitrate_col].values
                             vmaf_values = device_data['vmaf_mean'].values
                             
                             # Interpolate reference VMAF at same bitrates
@@ -1735,7 +1775,7 @@ class ReportGenerator:
         # Use the requested mode as default
         quality_fig = quality_fig_calculated if bitrate_mode == "calculated" else quality_fig_target
         performance_fig = self.create_performance_plots(test_results)
-        comparison_fig = self.create_comparison_plots(test_results)
+        comparison_fig = self.create_comparison_plots(test_results, bitrate_mode=bitrate_mode)
         siti_fig = self.create_siti_plots(test_results)
         
         # For dynamic BD-Rate, we'll generate plots in JavaScript
@@ -2018,11 +2058,29 @@ class ReportGenerator:
                     }}
                     
                     // Update the plot dynamically
-                    updateQualityPlots();
+                    updateQualityPlots(mode);
+                    
+                    // Update current bitrate mode for BD-Rate analysis
+                    currentBitrateMode = mode;
+                    
+                    // Extract raw quality data for BD-Rate analysis with new bitrate mode
+                    if (typeof extractRawQualityData === 'function') {{
+                        console.log('🔄 Extracting raw quality data with new bitrate mode:', mode);
+                        extractRawQualityData();
+                    }}
+                    
+                    // Regenerate BD-Rate analysis if it's already been initialized
+                    if (typeof regenerateBDRateAnalysis === 'function' && rawQualityData) {{
+                        var selectedReference = document.getElementById('bd-rate-reference-selector');
+                        if (selectedReference && selectedReference.value) {{
+                            console.log('🔄 Regenerating BD-Rate analysis with new bitrate mode:', mode);
+                            regenerateBDRateAnalysis(selectedReference.value);
+                        }}
+                    }}
                 }}
                 
-                function updateQualityPlots() {{
-                    console.log('Updating quality plots with mode:', currentBitrateMode);
+                function updateQualityPlots(mode) {{
+                    console.log('Updating quality plots with mode:', mode);
                     var plotElement = document.getElementById('quality-plots');
                     if (plotElement && qualityData) {{
                         Plotly.react(plotElement, qualityData.data, qualityData.layout, {{responsive: true}});
@@ -2090,6 +2148,37 @@ class ReportGenerator:
                     var deviceArray = Array.from(devices).sort();
                     console.log('📊 QUALITY DEVICES:', deviceArray);
                     return deviceArray;
+                }}
+                
+                // Extract unique codec-device pairs from quality data
+                function extractQualityPairs() {{
+                    var pairs = new Set();
+                    console.log('🔍 EXTRACTING QUALITY PAIRS...');
+                    // Use quality data for pair extraction
+                    var qualityDataForPairs = qualityData.data;
+                    console.log('Quality data length:', qualityDataForPairs.length);
+                    
+                    qualityDataForPairs.forEach(function(trace, index) {{
+                        var name = trace.name;
+                        // Only process traces that have a name and match the expected format
+                        if (name && typeof name === 'string') {{
+                            // Extract codec and device from trace name (format: "codec (device)")
+                            var match = name.match(/([^(]+)\\(([^)]+)\\)/);
+                            if (match) {{
+                                var codec = match[1].trim();
+                                var device = match[2].trim();
+                                var pair = codec + ' (' + device + ')';
+                                pairs.add(pair);
+                                console.log('✅ Found quality pair:', pair);
+                            }}
+                        }} else {{
+                            console.log('❌ Skipping quality trace with invalid name:', name);
+                        }}
+                    }});
+                    
+                    var pairArray = Array.from(pairs).sort();
+                    console.log('📊 QUALITY PAIRS:', pairArray);
+                    return pairArray;
                 }}
                 
                 // Create device filter checkboxes
@@ -2168,25 +2257,28 @@ class ReportGenerator:
                     console.log('🔧 PERFORMANCE DEVICE FILTERS CREATED');
                 }}
                 
-                // Extract unique devices from comparison data
+                // Extract unique codec-device pairs from comparison data
                 function extractComparisonDevices() {{
-                    var devices = new Set();
+                    var pairs = new Set();
                     console.log('Comparison data:', comparisonData);
                     comparisonData.data.forEach(function(trace) {{
                         var name = trace.name;
                         console.log('Comparison trace name:', name);
                         // Only process traces that have a name and match the expected format
                         if (name && typeof name === 'string') {{
-                            // Extract device from trace name (format: "codec (device)")
-                            var match = name.match(/\\(([^)]+)\\)/);
+                            // Extract codec and device from trace name (format: "codec (device)")
+                            var match = name.match(/([^(]+)\\(([^)]+)\\)/);
                             if (match) {{
-                                devices.add(match[1]);
-                                console.log('Found comparison device:', match[1]);
+                                var codec = match[1].trim();
+                                var device = match[2].trim();
+                                var pair = codec + ' (' + device + ')';
+                                pairs.add(pair);
+                                console.log('Found codec-device pair:', pair);
                             }}
                         }}
                     }});
-                    console.log('Extracted comparison devices:', Array.from(devices));
-                    return Array.from(devices).sort();
+                    console.log('Extracted comparison codec-device pairs:', Array.from(pairs));
+                    return Array.from(pairs).sort();
                 }}
                 
                 // Create comparison device filter checkboxes
@@ -2210,9 +2302,9 @@ class ReportGenerator:
                 
                 // Create reference selector options
                 function createReferenceSelector() {{
-                    var devices = extractComparisonDevices();
+                    var pairs = extractComparisonDevices();
                     var selector = document.getElementById('reference-selector');
-                    console.log('Creating reference selector for devices:', devices);
+                    console.log('Creating reference selector for codec-device pairs:', pairs);
                     console.log('Reference selector element:', selector);
                     
                     if (!selector) {{
@@ -2220,16 +2312,16 @@ class ReportGenerator:
                         return;
                     }}
                     
-                    // If no comparison devices, try to get devices from quality data
-                    if (devices.length === 0) {{
-                        console.log('No comparison devices found, trying quality data');
-                        devices = extractDevices();
-                        console.log('Quality devices for reference:', devices);
+                    // If no comparison pairs, try to get pairs from quality data
+                    if (pairs.length === 0) {{
+                        console.log('No comparison pairs found, trying quality data');
+                        pairs = extractQualityPairs();
+                        console.log('Quality pairs for reference:', pairs);
                     }}
                     
-                    if (devices.length === 0) {{
-                        console.log('No devices found for reference selector');
-                        selector.innerHTML = '<option value="">No devices available</option>';
+                    if (pairs.length === 0) {{
+                        console.log('No codec-device pairs found for reference selector');
+                        selector.innerHTML = '<option value="">No pairs available</option>';
                         return;
                     }}
                     
@@ -2238,14 +2330,14 @@ class ReportGenerator:
                         selector.removeChild(selector.lastChild);
                     }}
                     
-                    devices.forEach(function(device) {{
+                    pairs.forEach(function(pair) {{
                         var option = document.createElement('option');
-                        option.value = device;
-                        option.textContent = device;
+                        option.value = pair;
+                        option.textContent = pair;
                         selector.appendChild(option);
                     }});
                     
-                    console.log('Reference selector populated with', devices.length, 'devices');
+                    console.log('Reference selector populated with', pairs.length, 'codec-device pairs');
                 }}
                 
                 // Get codec type from trace name
@@ -2554,10 +2646,17 @@ class ReportGenerator:
                 // Update reference selection
                 function updateReference() {{
                     var selectedReference = document.getElementById('reference-selector').value;
+                    console.log('🔄 updateReference called with:', selectedReference);
+                    
                     if (selectedReference) {{
-                        console.log('Reference selected:', selectedReference);
+                        console.log('Reference codec-device pair selected:', selectedReference);
+                        console.log('Available original VMAF delta data:', originalVmafDeltaData.length, 'traces');
+                        console.log('Trace names:', originalVmafDeltaData.map(function(t) {{ return t.name; }}));
+                        
                         // Regenerate comparison plots with new reference
                         regenerateComparisonPlots(selectedReference);
+                    }} else {{
+                        console.log('No reference selected');
                     }}
                 }}
                 
@@ -2950,12 +3049,18 @@ class ReportGenerator:
                 // Extract original VMAF delta data from comparison plots
                 function extractOriginalVmafDeltaData() {{
                     originalVmafDeltaData = [];
+                    console.log('🔍 extractOriginalVmafDeltaData called');
+                    console.log('comparisonData:', comparisonData);
+                    
                     if (comparisonData && comparisonData.data) {{
                         console.log('🔍 Extracting original VMAF delta data from', comparisonData.data.length, 'traces');
                         comparisonData.data.forEach(function(trace, index) {{
                             console.log('🔍 Trace', index, ':', trace.name, 'xaxis:', trace.xaxis, 'yaxis:', trace.yaxis, 'has x:', !!trace.x, 'has y:', !!trace.y);
-                            // Look for VMAF delta traces (they should be in the first subplot)
-                            if (trace.xaxis === 'x' && trace.yaxis === 'y' && trace.name && trace.x && trace.y) {{
+                            // Look for VMAF delta traces - they should have data and be in the main plot
+                            // Check if it's a VMAF delta trace by looking for traces with data and a name
+                            if (trace.name && trace.x && trace.y && trace.x.length > 0 && trace.y.length > 0) {{
+                                // Include all traces that have data - don't filter based on delta values
+                                // The reference trace might show as 0 delta, which is valid
                                 console.log('✅ VMAF delta trace', index, ':', trace.name, 'y range:', Math.min(...trace.y), '-', Math.max(...trace.y));
                                 originalVmafDeltaData.push({{
                                     x: trace.x,
@@ -2964,26 +3069,27 @@ class ReportGenerator:
                                     mode: trace.mode || 'markers+lines',
                                     line: trace.line || {{ width: 2 }},
                                     marker: trace.marker || {{ size: 6 }},
-                                    xaxis: 'x',
-                                    yaxis: 'y'
+                                    xaxis: trace.xaxis || 'x',
+                                    yaxis: trace.yaxis || 'y'
                                 }});
                             }} else {{
-                                console.log('❌ Skipping trace', index, '- not a VMAF delta trace');
+                                console.log('❌ Skipping trace', index, ':', trace.name, '- missing data or name');
                             }}
                         }});
                     }} else {{
                         console.log('❌ No comparison data available');
                     }}
                     console.log('📊 Extracted original VMAF delta data:', originalVmafDeltaData.length, 'traces');
+                    console.log('Trace names:', originalVmafDeltaData.map(function(t) {{ return t.name; }}));
                 }}
                 
                 // Regenerate comparison plots with selected reference
-                function regenerateComparisonPlots(referenceDevice) {{
-                    console.log('🔄 Updating reference to:', referenceDevice);
+                function regenerateComparisonPlots(referencePair) {{
+                    console.log('🔄 regenerateComparisonPlots called with:', referencePair);
                     console.log('📊 Available original VMAF delta data:', originalVmafDeltaData.length, 'traces');
                     
-                    if (!referenceDevice) {{
-                        console.log('❌ No reference device selected');
+                    if (!referencePair) {{
+                        console.log('❌ No reference codec-device pair selected');
                         return;
                     }}
                     
@@ -2995,10 +3101,12 @@ class ReportGenerator:
                     var referenceTrace = null;
                     var referenceDeltas = [];
                     
-                    console.log('🔍 Looking for reference device:', referenceDevice, 'in', originalVmafDeltaData.length, 'traces');
+                    console.log('🔍 Looking for reference pair:', referencePair, 'in', originalVmafDeltaData.length, 'traces');
+                    console.log('Available trace names:', originalVmafDeltaData.map(function(t) {{ return t.name; }}));
+                    
                     originalVmafDeltaData.forEach(function(trace, index) {{
-                        console.log('🔍 Checking trace', index, ':', trace.name, 'includes', referenceDevice, '?', trace.name.includes(referenceDevice));
-                        if (trace.name && trace.name.includes(referenceDevice)) {{
+                        console.log('🔍 Checking trace', index, ':', trace.name, 'matches', referencePair, '?', trace.name === referencePair);
+                        if (trace.name && trace.name === referencePair) {{
                             referenceTrace = trace;
                             referenceDeltas = trace.y;
                             console.log('✅ Found reference trace:', trace.name, 'with deltas:', referenceDeltas);
@@ -3006,16 +3114,31 @@ class ReportGenerator:
                     }});
                     
                     if (!referenceTrace) {{
-                        console.log('❌ No reference trace found for:', referenceDevice);
+                        console.log('❌ No reference trace found for:', referencePair);
                         console.log('Available traces:', originalVmafDeltaData.map(function(t) {{ return t.name; }}));
-                        return;
+                        console.log('Trying to find partial match...');
+                        
+                        // Try partial matching as fallback
+                        originalVmafDeltaData.forEach(function(trace, index) {{
+                            if (trace.name && trace.name.includes(referencePair)) {{
+                                console.log('🔍 Partial match found:', trace.name, 'contains', referencePair);
+                                referenceTrace = trace;
+                                referenceDeltas = trace.y;
+                            }}
+                        }});
+                        
+                        if (!referenceTrace) {{
+                            console.log('❌ No partial match found either');
+                            return;
+                        }}
                     }}
                     
                     // Create new traces with adjusted deltas
                     var newTraces = [];
                     
                     originalVmafDeltaData.forEach(function(trace) {{
-                        if (trace.xaxis === 'x' && trace.yaxis === 'y') {{
+                        // Check if this is a valid trace with data
+                        if (trace.name && trace.x && trace.y && trace.x.length > 0 && trace.y.length > 0) {{
                             var adjustedY = [];
                             
                             if (trace.name === referenceTrace.name) {{
@@ -3041,10 +3164,12 @@ class ReportGenerator:
                                 type: 'scatter',
                                 line: trace.line || {{ width: 2 }},
                                 marker: trace.marker || {{ size: 6 }},
-                                xaxis: 'x',
-                                yaxis: 'y',
+                                xaxis: trace.xaxis || 'x',
+                                yaxis: trace.yaxis || 'y',
                                 showlegend: trace.showlegend !== false
                             }});
+                        }} else {{
+                            console.log('❌ Skipping invalid trace:', trace.name, 'x length:', trace.x ? trace.x.length : 0, 'y length:', trace.y ? trace.y.length : 0);
                         }}
                     }});
                     
@@ -3053,12 +3178,13 @@ class ReportGenerator:
                     
                     // Update the plot title
                     var update = {{
-                        'title': 'VMAF Delta Comparison (Reference: ' + referenceDevice + ')' + (scalingEnabled ? ' - Bitrate Scaled' : '')
+                        'title': 'VMAF Delta Comparison (Reference: ' + referencePair + ')' + (scalingEnabled ? ' - Bitrate Scaled' : '')
                     }};
                     Plotly.relayout('comparison-plots', update);
                     
                     console.log('✅ REFERENCE SWITCHING ACTIVE: Updated comparison plot with', newTraces.length, 'traces');
-                    console.log('Reference device:', referenceDevice, 'now shows as 0 delta');
+                    console.log('Original traces:', originalVmafDeltaData.length, 'Processed traces:', newTraces.length);
+                    console.log('Reference pair:', referencePair, 'now shows as 0 delta');
                     console.log('⚠️ Bitrate scaling for comparison not yet implemented - using original data');
                 }}
                 
@@ -3464,7 +3590,8 @@ class ReportGenerator:
 
     def create_bd_rate_visualizations(self, test_results: List[TestResult], 
                                     quality_metrics: List[str] = None,
-                                    reference_codec: str = None) -> Dict[str, go.Figure]:
+                                    reference_codec: str = None,
+                                    bitrate_mode: str = "calculated") -> Dict[str, go.Figure]:
         """
         Create BD-Rate visualizations for test results using the same data as quality plots
         
@@ -3513,8 +3640,14 @@ class ReportGenerator:
         # Combine all data
         combined_df = pd.concat(all_data, ignore_index=True)
         
+        # Determine which bitrate column to use
+        if bitrate_mode == "target":
+            bitrate_col = "bitrate_bps"
+        else:  # calculated
+            bitrate_col = "calculated_bitrate_bps"
+        
         # Check if we have the required columns
-        required_columns = ['vmaf_mean', 'calculated_bitrate_bps', 'codec']
+        required_columns = ['vmaf_mean', bitrate_col, 'codec']
         missing_columns = [col for col in required_columns if col not in combined_df.columns]
         if missing_columns:
             self.logger.warning(f"Missing required columns for BD-Rate analysis: {missing_columns}")
@@ -3739,23 +3872,48 @@ class ReportGenerator:
                                 rawQualityData[codec] = {{}};
                             }}
                             
-                            // Determine quality metric based on subplot (same as comparison tab)
+                            // Determine quality metric based on subplot position or trace characteristics
                             var metric = 'unknown';
+                            
+                            // Check yaxis property first
                             if (trace.yaxis === 'y') {{
                                 metric = 'vmaf';
                             }} else if (trace.yaxis === 'y2') {{
                                 metric = 'psnr';
                             }} else if (trace.yaxis === 'y3') {{
                                 metric = 'ssim';
+                            }} else {{
+                                // Fallback: determine metric based on data characteristics
+                                var yValues = trace.y;
+                                if (yValues && yValues.length > 0) {{
+                                    var minY = Math.min(...yValues);
+                                    var maxY = Math.max(...yValues);
+                                    
+                                    // VMAF: typically 0-100
+                                    if (minY >= 0 && maxY <= 100) {{
+                                        metric = 'vmaf';
+                                    }}
+                                    // PSNR: typically 20-50 dB
+                                    else if (minY >= 15 && maxY <= 60) {{
+                                        metric = 'psnr';
+                                    }}
+                                    // SSIM: typically 0-1
+                                    else if (minY >= 0 && maxY <= 1) {{
+                                        metric = 'ssim';
+                                    }}
+                                }}
                             }}
                             
                             if (metric !== 'unknown') {{
+                                console.log('✅ BD-Rate: Found', metric, 'data for', codec, ':', trace.x.length, 'points');
                                 rawQualityData[codec][metric] = {{
                                     bitrates: trace.x,
                                     qualities: trace.y,
                                     device: device,
                                     name: trace.name
                                 }};
+                            }} else {{
+                                console.log('❌ BD-Rate: Unknown metric for', codec, ':', trace.name, 'y range:', Math.min(...trace.y), '-', Math.max(...trace.y));
                             }}
                         }}
                     }}
