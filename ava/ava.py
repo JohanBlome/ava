@@ -948,9 +948,24 @@ class IntegratedTestRunner:
             encoding_csv_files = []
             
             # Look for _encoding_data.csv files in the same directory
-            for file in os.listdir(quality_dir):
-                if file.endswith('_encoding_data.csv'):
-                    encoding_csv_files.append(os.path.join(quality_dir, file))
+            # Handle case where quality_csv is in current directory (quality_dir is empty)
+            if quality_dir:
+                try:
+                    for file in os.listdir(quality_dir):
+                        if file.endswith('_encoding_data.csv'):
+                            encoding_csv_files.append(os.path.join(quality_dir, file))
+                except (OSError, FileNotFoundError):
+                    # Directory doesn't exist or can't be read, skip encoding data search
+                    pass
+            else:
+                # CSV file is in current directory, look there
+                try:
+                    for file in os.listdir('.'):
+                        if file.endswith('_encoding_data.csv'):
+                            encoding_csv_files.append(file)
+                except (OSError, FileNotFoundError):
+                    # Current directory can't be read, skip encoding data search
+                    pass
             
             # Create TestResult from quality CSV
             test_data = {
