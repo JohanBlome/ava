@@ -1126,8 +1126,8 @@ class ReportGenerator:
                     # Use codec name for color when using custom labels, device name otherwise
                     color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
                     line_style = self._get_codec_line_style(codec_type)
-        
-        fig.add_trace(
+                    
+                    fig.add_trace(
                         go.Scatter(
                             x=time_sec.tolist(),
                             y=inflight.tolist(),
@@ -1136,9 +1136,9 @@ class ReportGenerator:
                             line=dict(width=2, color=color, dash=line_style),
                             legendgroup=trace_name,
                             showlegend=False
-            ),
-            row=2, col=1
-        )
+                        ),
+                        row=2, col=1
+                    )
         
         # Plot 4: Bitrate Variability (separate by target bitrate)
         if 'bitrate_per_frame_bps' in combined_df.columns and 'frame' in combined_df.columns:
