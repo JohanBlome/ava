@@ -705,49 +705,6 @@ class ReportGenerator:
         """Get consistent trace name for filtering"""
         return f"{codec} ({device})"
     
-    def _get_color_for_trace(self, codec: str, device: str, test_name: str = None) -> str:
-        """Get consistent color for trace, considering custom labels"""
-        # If this is a custom labeled test, use the custom label for color assignment
-        if test_name and test_name.startswith("quality_analysis_") and len(test_name.split("_")) > 2:
-            custom_label = "_".join(test_name.split("_")[2:])  # Everything after "quality_analysis_"
-            # Use custom label for color assignment instead of original codec
-            return self._get_device_color(custom_label)
-        else:
-            # Original behavior: use device name for color
-            return self._get_device_color(device)
-    
-    def _get_line_style_for_trace(self, codec: str, test_name: str = None) -> str:
-        """Get consistent line style for trace, considering custom labels"""
-        # If this is a custom labeled test, use the custom label for line style
-        if test_name and test_name.startswith("quality_analysis_") and len(test_name.split("_")) > 2:
-            custom_label = "_".join(test_name.split("_")[2:])  # Everything after "quality_analysis_"
-            # Use custom label for line style instead of original codec
-            return self._get_codec_line_style(self._get_codec_type(custom_label))
-        else:
-            # Original behavior: use original codec name for line style
-            return self._get_codec_line_style(self._get_codec_type(codec))
-    
-    def _is_custom_labeled_codec(self, codec: str) -> bool:
-        """Check if a codec name is a custom label (not a standard codec name)"""
-        # Custom labels are typically short names like "config 1", "hevc_v1.0", etc.
-        # Standard codec names are longer and contain specific patterns
-        standard_codec_patterns = [
-            'c2.dolby.encoder.hevc',
-            'c2.qti.hevc.encoder.hdr',
-            'c2.av1.encoder',
-            'c2.avc.encoder',
-            'c2.vp8.encoder',
-            'c2.vp9.encoder'
-        ]
-        
-        # If it matches a standard codec pattern, it's not a custom label
-        for pattern in standard_codec_patterns:
-            if pattern in codec.lower():
-                return False
-        
-        # If it's a short name (less than 20 characters) and doesn't contain standard patterns, it's likely a custom label
-        return len(codec) < 20 and not any(pattern in codec.lower() for pattern in ['encoder', 'codec', 'h264', 'h265', 'av1', 'vp8', 'vp9'])
-    
     def _calculate_frame_statistics(self, device_data: pd.DataFrame, metric_column: str) -> tuple:
         """Calculate frame-based statistics with confidence intervals"""
         # Group by frame and calculate statistics
@@ -780,6 +737,28 @@ class ReportGenerator:
             lower_bound = np.maximum(lower_bound, 0)
         
         return time_sec, mean_values, upper_bound, lower_bound, count
+    
+    def _is_custom_labeled_codec(self, codec: str) -> bool:
+        """Check if a codec name is a custom label (not a standard codec name)"""
+        # Custom labels are typically short names like "config 1", "hevc_v1.0", etc.
+        # Standard codec names are longer and contain specific patterns
+        standard_codec_patterns = [
+            'c2.dolby.encoder.hevc',
+            'c2.qti.hevc.encoder.hdr',
+            'c2.av1.encoder',
+            'c2.avc.encoder',
+            'c2.vp8.encoder',
+            'c2.vp9.encoder'
+        ]
+        
+        # If it matches a standard codec pattern, it's not a custom label
+        for pattern in standard_codec_patterns:
+            if pattern in codec.lower():
+                return False
+        
+        # If it's a short name (less than 20 characters) and doesn't contain standard patterns, it's likely a custom label
+        return len(codec) < 20 and not any(pattern in codec.lower() for pattern in ['encoder', 'codec', 'h264', 'h265', 'av1', 'vp8', 'vp9'])
+    
 
     def _calculate_metric_statistics(self, combined_df: pd.DataFrame, metric_column: str, bitrate_column: str = 'calculated_bitrate_bps') -> dict:
         """
@@ -3422,171 +3401,6 @@ class ReportGenerator:
         
         self.logger.info(f"Interactive report saved to: {output_file}")
         return str(output_file)
-
-    def calculate_bd_rate_analysis(self, test_results: List[TestResult], 
-                                 quality_metrics: List[str] = None) -> Dict[str, Any]:
-        """
-        Calculate BD-Rate analysis for codec comparison
-        
-        Args:
-            test_results: List of test results
-            quality_metrics: List of quality metrics to analyze
-            
-        Returns:
-            Dictionary with BD-Rate analysis results
-        """
-        # BD-Rate modules are required - will fail fast if not available
-        
-        if quality_metrics is None:
-            quality_metrics = ['vmaf', 'psnr', 'ssim']
-        
-        analyzer = AVABDRateAnalyzer()
-        results = {}
-        
-        # Find quality CSV files
-        quality_csv_files = []
-        for result in test_results:
-            if (result.success and hasattr(result, 'test_data') and 
-                'quality_csv' in result.test_data and 
-                os.path.exists(result.test_data['quality_csv'])):
-                quality_csv_files.append(result.test_data['quality_csv'])
-        
-        if not quality_csv_files:
-            self.logger.warning("No quality CSV files found for BD-Rate analysis")
-            return {}
-        
-        # Analyze each CSV file
-        for csv_file in quality_csv_files:
-            file_name = Path(csv_file).stem
-            results[file_name] = {}
-            
-            for metric in quality_metrics:
-                try:
-                    bd_results = analyzer.compare_all_codecs_from_csv(csv_file, metric)
-                    results[file_name][metric] = bd_results
-                except Exception as e:
-                    self.logger.error(f"BD-Rate analysis failed for {csv_file} ({metric}): {e}")
-                    results[file_name][metric] = {}
-        
-        return results
-    
-    def create_bd_rate_plot(self, bd_results: Dict[str, BDRateResult], 
-                          quality_metric: str = 'psnr') -> go.Figure:
-        """
-        Create a bar chart showing BD-Rate comparisons
-        
-        Args:
-            bd_results: Dictionary of BD-Rate results
-            quality_metric: Quality metric name for title
-            
-        Returns:
-            Plotly figure
-        """
-        if not bd_results:
-            # Return empty figure
-            fig = go.Figure()
-            fig.add_annotation(
-                text="No BD-Rate data available",
-                xref="paper", yref="paper",
-                x=0.5, y=0.5, showarrow=False,
-                font=dict(size=16)
-            )
-            return fig
-        
-        # Extract data for plotting
-        codec_pairs = []
-        bd_rates = []
-        colors = []
-        
-        for pair_name, result in bd_results.items():
-            codec_pairs.append(pair_name.replace('_vs_', ' vs '))
-            bd_rates.append(result.bd_rate)
-            
-            # Color based on positive/negative BD-Rate
-            if result.bd_rate > 0:
-                colors.append('red')  # Higher bitrate (worse)
-            else:
-                colors.append('green')  # Lower bitrate (better)
-        
-        # Create bar chart
-        fig = go.Figure(data=[
-            go.Bar(
-                x=codec_pairs,
-                y=bd_rates,
-                marker_color=colors,
-                text=[f"{rate:.2f}%" for rate in bd_rates],
-                textposition='auto',
-                hovertemplate='<b>%{x}</b><br>BD-Rate: %{y:.2f}%<extra></extra>'
-            )
-        ])
-        
-        fig.update_layout(
-            title=f"BD-Rate Comparison ({quality_metric.upper()})",
-            xaxis_title="Codec Pairs",
-            yaxis_title="BD-Rate (%)",
-            yaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=2),
-            showlegend=False,
-            height=400
-        )
-        
-        # Add horizontal line at 0
-        fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
-        
-        return fig
-    
-    def generate_bd_rate_report(self, test_results: List[TestResult], 
-                              output_file: str = None) -> str:
-        """
-        Generate BD-Rate analysis report
-        
-        Args:
-            test_results: List of test results
-            output_file: Optional output file path
-            
-        Returns:
-            Report content as string
-        """
-        # BD-Rate modules are required - will fail fast if not available
-        
-        # Calculate BD-Rate analysis
-        bd_analysis = self.calculate_bd_rate_analysis(test_results)
-        
-        if not bd_analysis:
-            return "No BD-Rate data available for analysis"
-        
-        # Generate report
-        report_lines = []
-        report_lines.append("=" * 80)
-        report_lines.append("Bjøntegaard-Delta (BD-Rate) Analysis Report")
-        report_lines.append("=" * 80)
-        report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report_lines.append("")
-        
-        for file_name, file_results in bd_analysis.items():
-            report_lines.append(f"File: {file_name}")
-            report_lines.append("-" * 40)
-            
-            for metric, metric_results in file_results.items():
-                if not metric_results:
-                    continue
-                    
-                report_lines.append(f"\nQuality Metric: {metric.upper()}")
-                report_lines.append("-" * 20)
-                
-                for pair_name, result in metric_results.items():
-                    report_lines.append(f"\nComparison: {pair_name}")
-                    report_lines.append(format_bd_rate_result(result))
-                    report_lines.append("")
-        
-        report_content = "\n".join(report_lines)
-        
-        # Save to file if specified
-        if output_file:
-            with open(output_file, 'w') as f:
-                f.write(report_content)
-            self.logger.info(f"BD-Rate report saved to: {output_file}")
-        
-        return report_content
 
     def create_bd_rate_visualizations(self, test_results: List[TestResult], 
                                     quality_metrics: List[str] = None,
