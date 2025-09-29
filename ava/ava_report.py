@@ -18,6 +18,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -87,106 +88,6 @@ class ReportGenerator:
             
         return logger
     
-    def create_quality_plots_with_both_bitrates(self, test_results: List[TestResult]) -> Tuple[go.Figure, Dict[str, Any]]:
-        """Create quality plots with both calculated and target bitrate data for dynamic switching
-            
-        Returns:
-            Tuple of (figure, data_dict) where data_dict contains both bitrate datasets
-        """
-        # Create subplots for different quality metrics
-        fig = make_subplots(
-            rows=3, cols=2,
-            subplot_titles=("VMAF vs Bitrate", "PSNR vs Bitrate", 
-                          "SSIM vs Bitrate", "QP Statistics",
-                          "Target vs Actual Bitrate", "Bitrate Accuracy"),
-            specs=[[{"secondary_y": False}, {"secondary_y": False}],
-                   [{"secondary_y": False}, {"secondary_y": False}],
-                   [{"secondary_y": False}, {"secondary_y": False}]]
-        )
-        
-        # Read all quality CSV files directly
-        all_data = []
-        for result in test_results:
-            if result.success and hasattr(result, 'test_data') and 'quality_csv' in result.test_data:
-                csv_file = result.test_data['quality_csv']
-                if os.path.exists(csv_file):
-                    try:
-                        df = pd.read_csv(csv_file)
-                        if not df.empty:
-                            # Add device info to the dataframe
-                            df['device_serial'] = result.device_serial
-                            df['test_name'] = result.test_name
-                            
-                            # Apply custom labels if this is a custom labeled test
-                            df = self._apply_custom_labels_to_dataframe(df, result)
-                            
-                            all_data.append(df)
-                    except pd.errors.EmptyDataError:
-                        # Skip empty CSV files (e.g., when quality analysis fails)
-                        print(f"Warning: Skipping empty quality CSV file: {csv_file}")
-                        continue
-        
-        if not all_data:
-            # Add a message when no quality data is available
-            fig.add_annotation(
-                text="No quality data available. Quality analysis requires valid encoded video files.",
-                xref="paper", yref="paper",
-                x=0.5, y=0.5, xanchor="center", yanchor="middle",
-                showarrow=False, font=dict(size=16, color="red")
-            )
-            return fig, {}
-            
-        # Combine all data
-        combined_df = pd.concat(all_data, ignore_index=True)
-        
-        # Check if we have the required columns
-        has_calculated = 'calculated_bitrate_bps' in combined_df.columns
-        has_target = 'bitrate_bps' in combined_df.columns
-        has_quality = 'vmaf_mean' in combined_df.columns
-        
-        if not has_quality or (not has_calculated and not has_target):
-            # Add a message when no quality data is available
-            fig.add_annotation(
-                text="No quality data available. Quality analysis requires valid encoded video files.",
-                xref="paper", yref="paper",
-                x=0.5, y=0.5, xanchor="center", yanchor="middle",
-                showarrow=False, font=dict(size=16, color="red")
-            )
-            return fig, {}
-        
-        # Prepare data for both bitrate modes
-        data_dict = {
-            'calculated': self._prepare_bitrate_data(combined_df, 'calculated_bitrate_bps', 'Calculated Bitrate (kbps)'),
-            'target': self._prepare_bitrate_data(combined_df, 'bitrate_bps', 'Target Bitrate (kbps)')
-        }
-        
-        # Create initial plots with calculated bitrate (default)
-        self._add_quality_plots_to_figure(fig, data_dict['calculated'])
-        
-        # Update layout
-        fig.update_layout(
-            title="Quality Metrics Analysis (Direct from CSV)",
-            height=1200,
-            showlegend=True,
-            autosize=True,
-            dragmode='zoom',
-            hovermode='x unified'
-        )
-        
-        # Update axes labels
-        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=1, col=1)
-        fig.update_yaxes(title_text="VMAF", row=1, col=1)
-        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=1, col=2)
-        fig.update_yaxes(title_text="PSNR (dB)", row=1, col=2)
-        fig.update_xaxes(title_text="Calculated Bitrate (kbps)", row=2, col=1)
-        fig.update_yaxes(title_text="SSIM", row=2, col=1)
-        fig.update_xaxes(title_text="Target Bitrate (kbps)", row=3, col=1)
-        fig.update_yaxes(title_text="Actual Bitrate (kbps)", row=3, col=1)
-        fig.update_xaxes(title_text="Target Bitrate (kbps)", row=3, col=2)
-        fig.update_yaxes(title_text="Bitrate Accuracy (%)", row=3, col=2)
-        
-        return fig, data_dict
-    
     def _prepare_bitrate_data(self, combined_df: pd.DataFrame, bitrate_col: str, bitrate_label: str) -> Dict[str, Any]:
         """Prepare data for a specific bitrate mode"""
         if bitrate_col not in combined_df.columns:
@@ -196,106 +97,200 @@ class ReportGenerator:
         
         # VMAF plot data
         if 'vmaf_mean' in combined_df.columns:
-            for codec in combined_df['codec'].unique():
-                codec_data = combined_df[combined_df['codec'] == codec].sort_values(bitrate_col)
-                for device in codec_data['device_serial'].unique():
-                    device_data = codec_data[codec_data['device_serial'] == device]
-                    model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                    
-                    # Get consistent color and line style
-                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                    codec_type = self._get_codec_type(codec)
-                    line_style = self._get_codec_line_style(codec_type)
-                    trace_name = self._get_trace_name(codec, model)
+            # Calculate VMAF statistics across multiple sources
+            vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', bitrate_col)
+            
+            for codec, stats_data in vmaf_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
+                traces.append({
+                    'type': 'scatter',
+                    'x': bitrates_kbps.tolist(),
+                    'y': stats_data['mean_values'].tolist(),
+                    'mode': 'markers+lines',
+                    'name': trace_name,
+                    'line': {'color': color, 'dash': line_style, 'width': 3},
+                    'marker': {'size': 6},
+                    'legendgroup': codec,
+                    'showlegend': True,
+                    'row': 1,
+                    'col': 1,
+                    'hovertemplate': f"<b>{codec}</b><br>" +
+                                   f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                   f"VMAF: %{{y:.2f}}<br>" +
+                                   f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                   f"Sources: {len(stats_data['sources'])}<br>" +
+                                   "<extra></extra>"
+                })
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
                     
                     traces.append({
                         'type': 'scatter',
-                        'x': (device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
-                        'y': device_data['vmaf_mean'].tolist(),
-                        'mode': 'markers+lines',
-                        'name': trace_name,
-                        'line': {'color': color, 'dash': line_style, 'width': 2},
-                        'marker': {'size': 6},
-                        'legendgroup': trace_name,
-                        'showlegend': True,
+                        'x': bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                        'y': stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                        'fill': 'tonexty',
+                        'fillcolor': fillcolor,
+                        'line': {'color': 'rgba(255,255,255,0)'},
+                        'legendgroup': codec,
+                        'showlegend': False,
                         'row': 1,
-                        'col': 1
+                        'col': 1,
+                        'hoverinfo': 'skip'
                     })
         
         # PSNR plot data
         if 'psnr' in combined_df.columns:
-            valid_psnr_data = combined_df[combined_df['psnr'] != -1]
-            if not valid_psnr_data.empty:
-                for codec in valid_psnr_data['codec'].unique():
-                    codec_data = valid_psnr_data[valid_psnr_data['codec'] == codec].sort_values(bitrate_col)
-                    for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device]
-                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                        
-                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                        codec_type = self._get_codec_type(codec)
-                        line_style = self._get_codec_line_style(codec_type)
-                        trace_name = self._get_trace_name(codec, model)
-                        
-                        traces.append({
-                            'type': 'scatter',
-                            'x': (device_data[bitrate_col] / 1000).tolist(),
-                            'y': device_data['psnr'].tolist(),
-                            'mode': 'markers+lines',
-                            'name': trace_name,
-                            'line': {'color': color, 'dash': line_style, 'width': 2},
-                            'marker': {'size': 6},
-                            'legendgroup': trace_name,
-                            'showlegend': False,
-                            'row': 1,
-                            'col': 2
-                        })
+            # Calculate PSNR statistics across multiple sources
+            psnr_stats = self._calculate_metric_statistics(combined_df, 'psnr', bitrate_col)
+            
+            for codec, stats_data in psnr_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
+                traces.append({
+                    'type': 'scatter',
+                    'x': bitrates_kbps.tolist(),
+                    'y': stats_data['mean_values'].tolist(),
+                    'mode': 'markers+lines',
+                    'name': trace_name,
+                    'line': {'color': color, 'dash': line_style, 'width': 3},
+                    'marker': {'size': 6},
+                    'legendgroup': codec,
+                    'showlegend': False,
+                    'row': 1,
+                    'col': 2,
+                    'hovertemplate': f"<b>{codec}</b><br>" +
+                                   f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                   f"PSNR: %{{y:.2f}} dB<br>" +
+                                   f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                   f"Sources: {len(stats_data['sources'])}<br>" +
+                                   "<extra></extra>"
+                })
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                    
+                    traces.append({
+                        'type': 'scatter',
+                        'x': bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                        'y': stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                        'fill': 'tonexty',
+                        'fillcolor': fillcolor,
+                        'line': {'color': 'rgba(255,255,255,0)'},
+                        'legendgroup': codec,
+                        'showlegend': False,
+                        'row': 1,
+                        'col': 2,
+                        'hoverinfo': 'skip'
+                    })
         
         # SSIM plot data
         if 'ssim' in combined_df.columns:
-            valid_ssim_data = combined_df[combined_df['ssim'] != -1]
-            if not valid_ssim_data.empty:
-                for codec in valid_ssim_data['codec'].unique():
-                    codec_data = valid_ssim_data[valid_ssim_data['codec'] == codec].sort_values(bitrate_col)
-                    for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device]
-                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                        
-                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                        codec_type = self._get_codec_type(codec)
-                        line_style = self._get_codec_line_style(codec_type)
-                        trace_name = self._get_trace_name(codec, model)
-                        
-                        traces.append({
-                            'type': 'scatter',
-                            'x': (device_data[bitrate_col] / 1000).tolist(),
-                            'y': device_data['ssim'].tolist(),
-                            'mode': 'markers+lines',
-                            'name': trace_name,
-                            'line': {'color': color, 'dash': line_style, 'width': 2},
-                            'marker': {'size': 6},
-                            'legendgroup': trace_name,
-                            'showlegend': False,
-                            'row': 2,
-                            'col': 1
-                        })
+            # Calculate SSIM statistics across multiple sources
+            ssim_stats = self._calculate_metric_statistics(combined_df, 'ssim', bitrate_col)
+            
+            for codec, stats_data in ssim_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
+                traces.append({
+                    'type': 'scatter',
+                    'x': bitrates_kbps.tolist(),
+                    'y': stats_data['mean_values'].tolist(),
+                    'mode': 'markers+lines',
+                    'name': trace_name,
+                    'line': {'color': color, 'dash': line_style, 'width': 3},
+                    'marker': {'size': 6},
+                    'legendgroup': codec,
+                    'showlegend': False,
+                    'row': 2,
+                    'col': 1,
+                    'hovertemplate': f"<b>{codec}</b><br>" +
+                                   f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                   f"SSIM: %{{y:.4f}}<br>" +
+                                   f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                   f"Sources: {len(stats_data['sources'])}<br>" +
+                                   "<extra></extra>"
+                })
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                    
+                    traces.append({
+                        'type': 'scatter',
+                        'x': bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                        'y': stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                        'fill': 'tonexty',
+                        'fillcolor': fillcolor,
+                        'line': {'color': 'rgba(255,255,255,0)'},
+                        'legendgroup': codec,
+                        'showlegend': False,
+                        'row': 2,
+                        'col': 1,
+                        'hoverinfo': 'skip'
+                    })
         
         return {
             'traces': traces,
             'bitrate_label': bitrate_label
         }
-    
-    def _add_quality_plots_to_figure(self, fig: go.Figure, data: Dict[str, Any]) -> None:
-        """Add quality plots to figure using prepared data"""
-        for trace_data in data['traces']:
-            # Extract row and col for positioning
-            row = trace_data.pop('row', 1)
-            col = trace_data.pop('col', 1)
-            
-            fig.add_trace(
-                go.Scatter(**trace_data),
-                row=row, col=col
-            )
     
     def create_quality_plots_from_csv(self, test_results: List[TestResult], bitrate_mode: str = "calculated") -> go.Figure:
         """Create quality plots directly from CSV files
@@ -372,96 +367,195 @@ class ReportGenerator:
         
         # VMAF plot - use selected bitrate column for X-axis
         if 'vmaf_mean' in combined_df.columns and bitrate_col in combined_df.columns:
-            for codec in combined_df['codec'].unique():
-                codec_data = combined_df[combined_df['codec'] == codec].sort_values(bitrate_col)
-                for device in codec_data['device_serial'].unique():
-                    device_data = codec_data[codec_data['device_serial'] == device]
-                    model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                    
-                    # Get consistent color and line style
-                    # Use codec name for color when using custom labels, device name otherwise
-                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                    codec_type = self._get_codec_type(codec)
-                    line_style = self._get_codec_line_style(codec_type)
-                    trace_name = self._get_trace_name(codec, model)
-                    
+            # Calculate VMAF statistics across multiple sources
+            vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', bitrate_col)
+            
+            for codec, stats_data in vmaf_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
                 fig.add_trace(
                     go.Scatter(
-                            x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
-                            y=device_data['vmaf_mean'].tolist(),
+                        x=bitrates_kbps.tolist(),
+                        y=stats_data['mean_values'].tolist(),
                         mode='markers+lines',
-                            name=trace_name,
-                            line=dict(color=color, dash=line_style, width=2),
-                            marker=dict(size=6),
-                            legendgroup=trace_name,
-                            showlegend=True
+                        name=trace_name,
+                        line=dict(color=color, dash=line_style, width=3),
+                        marker=dict(size=6),
+                        legendgroup=codec,
+                        showlegend=True,
+                        hovertemplate=f"<b>{codec}</b><br>" +
+                                     f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                     f"VMAF: %{{y:.2f}}<br>" +
+                                     f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                     f"Sources: {len(stats_data['sources'])}<br>" +
+                                     "<extra></extra>"
                     ),
                     row=1, col=1
                 )
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            fill='tonexty',
+                            fillcolor=fillcolor,
+                            line=dict(color='rgba(255,255,255,0)'),
+                            legendgroup=codec,
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ),
+                        row=1, col=1
+                    )
         
         # PSNR plot - use selected bitrate column for X-axis
         if 'psnr' in combined_df.columns and bitrate_col in combined_df.columns:
-            # Filter out invalid PSNR values
-            valid_psnr_data = combined_df[combined_df['psnr'] != -1]
-            if not valid_psnr_data.empty:
-                for codec in valid_psnr_data['codec'].unique():
-                    codec_data = valid_psnr_data[valid_psnr_data['codec'] == codec].sort_values(bitrate_col)
-                    for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device]
-                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                        
-                        # Get consistent color and line style
-                        # Use codec name for color when using custom labels, device name otherwise
-                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                        codec_type = self._get_codec_type(codec)
-                        line_style = self._get_codec_line_style(codec_type)
-                        trace_name = self._get_trace_name(codec, model)
-                        
-                        fig.add_trace(
-                            go.Scatter(
-                                x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
-                                y=device_data['psnr'].tolist(),
-                                mode='markers+lines',
-                                name=trace_name,
-                                line=dict(color=color, dash=line_style, width=2),
-                                marker=dict(size=6),
-                                legendgroup=trace_name,
-                                showlegend=False
-                            ),
-                            row=1, col=2
-                        )
+            # Calculate PSNR statistics across multiple sources
+            psnr_stats = self._calculate_metric_statistics(combined_df, 'psnr', bitrate_col)
+            
+            for codec, stats_data in psnr_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
+                fig.add_trace(
+                    go.Scatter(
+                        x=bitrates_kbps.tolist(),
+                        y=stats_data['mean_values'].tolist(),
+                        mode='markers+lines',
+                        name=trace_name,
+                        line=dict(color=color, dash=line_style, width=3),
+                        marker=dict(size=6),
+                        legendgroup=codec,
+                        showlegend=False,
+                        hovertemplate=f"<b>{codec}</b><br>" +
+                                     f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                     f"PSNR: %{{y:.2f}} dB<br>" +
+                                     f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                     f"Sources: {len(stats_data['sources'])}<br>" +
+                                     "<extra></extra>"
+                    ),
+                    row=1, col=2
+                )
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            fill='tonexty',
+                            fillcolor=fillcolor,
+                            line=dict(color='rgba(255,255,255,0)'),
+                            legendgroup=codec,
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ),
+                        row=1, col=2
+                    )
         
         # SSIM plot - use selected bitrate column for X-axis
         if 'ssim' in combined_df.columns and bitrate_col in combined_df.columns:
-            # Filter out invalid SSIM values
-            valid_ssim_data = combined_df[combined_df['ssim'] != -1]
-            if not valid_ssim_data.empty:
-                for codec in valid_ssim_data['codec'].unique():
-                    codec_data = valid_ssim_data[valid_ssim_data['codec'] == codec].sort_values(bitrate_col)
-                    for device in codec_data['device_serial'].unique():
-                        device_data = codec_data[codec_data['device_serial'] == device]
-                        model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
-                        
-                        # Get consistent color and line style
-                        # Use codec name for color when using custom labels, device name otherwise
-                        color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                        codec_type = self._get_codec_type(codec)
-                        line_style = self._get_codec_line_style(codec_type)
-                        trace_name = self._get_trace_name(codec, model)
-                        
-                        fig.add_trace(
-                            go.Scatter(
-                                x=(device_data[bitrate_col] / 1000).tolist(),  # Convert to kbps
-                                y=device_data['ssim'].tolist(),
-                                mode='markers+lines',
-                                name=trace_name,
-                                line=dict(color=color, dash=line_style, width=2),
-                                marker=dict(size=6),
-                                legendgroup=trace_name,
-                                showlegend=False
-                            ),
-                            row=2, col=1
-                        )
+            # Calculate SSIM statistics across multiple sources
+            ssim_stats = self._calculate_metric_statistics(combined_df, 'ssim', bitrate_col)
+            
+            for codec, stats_data in ssim_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace
+                fig.add_trace(
+                    go.Scatter(
+                        x=bitrates_kbps.tolist(),
+                        y=stats_data['mean_values'].tolist(),
+                        mode='markers+lines',
+                        name=trace_name,
+                        line=dict(color=color, dash=line_style, width=3),
+                        marker=dict(size=6),
+                        legendgroup=codec,
+                        showlegend=False,
+                        hovertemplate=f"<b>{codec}</b><br>" +
+                                     f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                     f"SSIM: %{{y:.4f}}<br>" +
+                                     f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                     f"Sources: {len(stats_data['sources'])}<br>" +
+                                     "<extra></extra>"
+                    ),
+                    row=2, col=1
+                )
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency
+                    if color.startswith('#'):
+                        # Convert hex to rgb
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                    else:
+                        # Fallback to gray if color format is unexpected
+                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
+                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            fill='tonexty',
+                            fillcolor=fillcolor,
+                            line=dict(color='rgba(255,255,255,0)'),
+                            legendgroup=codec,
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ),
+                        row=2, col=1
+                    )
         
         # Target vs Actual Bitrate plot (as line graph)
         if 'bitrate_bps' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
@@ -686,6 +780,165 @@ class ReportGenerator:
             lower_bound = np.maximum(lower_bound, 0)
         
         return time_sec, mean_values, upper_bound, lower_bound, count
+
+    def _calculate_metric_statistics(self, combined_df: pd.DataFrame, metric_column: str, bitrate_column: str = 'calculated_bitrate_bps') -> dict:
+        """
+        Calculate any metric (e.g. vmaf_mean, psnr, ssim) over multiple sources with confidence intervals.
+        
+        This function is designed to prepare data for smoother Quality Metric graphs by aggregating
+        metrics across multiple sources (devices) and providing confidence intervals.
+        
+        Args:
+            combined_df: DataFrame containing all test results
+            metric_column: Column name for the metric to calculate (e.g., 'vmaf_mean', 'psnr', 'ssim')
+            bitrate_column: Column name for bitrate (e.g., 'calculated_bitrate_bps', 'bitrate_bps')
+            
+        Returns:
+            Dictionary with structure:
+            {
+                'codec_name': {
+                    'bitrates': array of bitrate values,
+                    'mean_values': array of mean metric values,
+                    'upper_bound': array of upper confidence bound values,
+                    'lower_bound': array of lower confidence bound values,
+                    'count': array of sample counts,
+                    'sources': list of source identifiers
+                }
+            }
+            
+        Example:
+            # Calculate VMAF statistics across multiple sources
+            vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', 'calculated_bitrate_bps')
+            
+            # Calculate PSNR statistics using target bitrate
+            psnr_stats = self._calculate_metric_statistics(combined_df, 'psnr', 'bitrate_bps')
+            
+            # Access data for a specific codec
+            if 'h264' in vmaf_stats:
+                codec_data = vmaf_stats['h264']
+                bitrates = codec_data['bitrates']
+                mean_vmaf = codec_data['mean_values']
+                confidence_upper = codec_data['upper_bound']
+                confidence_lower = codec_data['lower_bound']
+        """
+        results = {}
+        
+        # Validate input columns
+        if metric_column not in combined_df.columns:
+            self.logger.warning(f"Metric column '{metric_column}' not found in data")
+            return results
+            
+        if bitrate_column not in combined_df.columns:
+            self.logger.warning(f"Bitrate column '{bitrate_column}' not found in data")
+            return results
+        
+        # Filter out invalid values for the metric
+        valid_data = combined_df.copy()
+        if metric_column in ['psnr', 'ssim']:
+            # PSNR and SSIM use -1 to indicate invalid values
+            valid_data = valid_data[valid_data[metric_column] != -1]
+        elif metric_column == 'vmaf_mean':
+            # VMAF should be between 0 and 100
+            valid_data = valid_data[(valid_data[metric_column] >= 0) & (valid_data[metric_column] <= 100)]
+        
+        if valid_data.empty:
+            self.logger.warning(f"No valid data found for metric '{metric_column}'")
+            return results
+        
+        # Group by codec and calculate statistics
+        for codec in valid_data['codec'].unique():
+            codec_data = valid_data[valid_data['codec'] == codec]
+            
+            # Sort by bitrate for consistent ordering
+            codec_data = codec_data.sort_values(bitrate_column)
+            
+            # Get unique bitrate values
+            unique_bitrates = sorted(codec_data[bitrate_column].unique())
+            
+            if len(unique_bitrates) < 2:
+                self.logger.warning(f"Not enough bitrate points for codec '{codec}' (need at least 2)")
+                continue
+            
+            # Calculate statistics for each bitrate point
+            bitrate_values = []
+            mean_values = []
+            upper_bounds = []
+            lower_bounds = []
+            counts = []
+            sources = []
+            
+            for bitrate in unique_bitrates:
+                # Get all data points at this bitrate
+                bitrate_data = codec_data[codec_data[bitrate_column] == bitrate]
+                
+                if bitrate_data.empty:
+                    continue
+                
+                # Calculate statistics across all sources (devices) at this bitrate
+                metric_values = bitrate_data[metric_column].values
+                mean_val = np.mean(metric_values)
+                count = len(metric_values)
+                
+                # Only calculate confidence intervals if we have enough data points
+                # For single video with few bitrates, just use the mean values
+                if count < 3:  # Need at least 3 data points for meaningful confidence intervals
+                    # No confidence interval - just use the mean value
+                    upper_bound = mean_val
+                    lower_bound = mean_val
+                else:
+                    # Calculate proper confidence intervals
+                    std_val = np.std(metric_values, ddof=1)  # Sample standard deviation
+                    
+                    # Handle case where all values are the same (std = 0)
+                    if std_val == 0:
+                        std_val = mean_val * 0.01  # Use 1% of mean as small std
+                    
+                    # Calculate confidence interval
+                    # Use t-distribution for small samples, normal for large samples
+                    if count < 30:
+                        # Use t-distribution for small samples
+                        t_value = stats.t.ppf(0.975, count - 1)  # 95% CI
+                        confidence_factor = t_value
+                    else:
+                        # Use normal distribution for large samples
+                        confidence_factor = 1.96  # 95% CI
+                    
+                    upper_bound = mean_val + confidence_factor * (std_val / np.sqrt(count))
+                    lower_bound = mean_val - confidence_factor * (std_val / np.sqrt(count))
+                    
+                    # Ensure bounds are reasonable for the metric
+                    if metric_column in ['psnr', 'ssim', 'vmaf_mean']:
+                        if metric_column == 'vmaf_mean':
+                            lower_bound = max(0, lower_bound)
+                            upper_bound = min(100, upper_bound)
+                        elif metric_column == 'psnr':
+                            lower_bound = max(0, lower_bound)  # PSNR should be positive
+                        elif metric_column == 'ssim':
+                            lower_bound = max(0, lower_bound)
+                            upper_bound = min(1, upper_bound)
+                
+                bitrate_values.append(bitrate)
+                mean_values.append(mean_val)
+                upper_bounds.append(upper_bound)
+                lower_bounds.append(lower_bound)
+                counts.append(count)
+                
+                # Collect source identifiers
+                source_ids = bitrate_data['device_serial'].unique().tolist()
+                sources.extend(source_ids)
+            
+            if len(bitrate_values) > 0:
+                results[codec] = {
+                    'bitrates': np.array(bitrate_values),
+                    'mean_values': np.array(mean_values),
+                    'upper_bound': np.array(upper_bounds),
+                    'lower_bound': np.array(lower_bounds),
+                    'count': np.array(counts),
+                    'sources': list(set(sources))  # Unique sources
+                }
+        
+        return results
+
 
     def create_performance_plots(self, test_results: List[TestResult]) -> go.Figure:
         """Create performance plots from encoder statistics CSV files"""
@@ -3059,7 +3312,7 @@ class ReportGenerator:
         # BD-Rate modules are required - will fail fast if not available
         
         if quality_metrics is None:
-            quality_metrics = ['psnr', 'ssim', 'vmaf']
+            quality_metrics = ['vmaf', 'psnr', 'ssim']
         
         analyzer = AVABDRateAnalyzer()
         results = {}
@@ -3226,7 +3479,7 @@ class ReportGenerator:
         # BD-Rate modules are required - will fail fast if not available
         
         if quality_metrics is None:
-            quality_metrics = ['psnr', 'ssim', 'vmaf']
+            quality_metrics = ['vmaf', 'psnr', 'ssim']
         
         visualizer = BDRateVisualizer()
         analyzer = AVABDRateAnalyzer()
@@ -3280,7 +3533,10 @@ class ReportGenerator:
             if reference_codec is None and available_codecs:
                 reference_codec = available_codecs[0]
             
-            # Create visualizations for each quality metric
+            # First pass: collect all BD-Rate results to determine consistent scaling
+            all_bd_results = {}
+            all_rd_curves = {}
+            
             for metric in quality_metrics:
                 try:
                     # Get RD curves for this metric
@@ -3304,15 +3560,55 @@ class ReportGenerator:
                         self.logger.warning(f"No BD-Rate results for {metric}")
                         continue
                     
+                    all_bd_results[metric] = bd_results
+                    all_rd_curves[metric] = rd_curves_metric
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to collect BD-Rate data for {metric}: {e}")
+            
+            # Calculate consistent y-axis range for all BD-Rate bar charts
+            all_bd_rates = []
+            for bd_results in all_bd_results.values():
+                for result in bd_results.values():
+                    all_bd_rates.append(result.bd_rate)
+            
+            if all_bd_rates:
+                # Add some padding to the range
+                min_rate = min(all_bd_rates)
+                max_rate = max(all_bd_rates)
+                padding = (max_rate - min_rate) * 0.1  # 10% padding
+                y_range = [min_rate - padding, max_rate + padding]
+            else:
+                y_range = None
+            
+            # Second pass: create visualizations with consistent scaling
+            for metric in quality_metrics:
+                if metric not in all_bd_results:
+                    continue
+                    
+                try:
+                    bd_results = all_bd_results[metric]
+                    rd_curves_metric = all_rd_curves[metric]
+                    
+                    if reference_codec and reference_codec in available_codecs:
+                        viz_key = f"combined_{metric}_ref_{reference_codec.replace('.', '_')}"
+                    else:
+                        viz_key = f"combined_{metric}"
+                    
                     # Rate-distortion curves
                     rd_fig = visualizer.create_rd_curve_plot(rd_curves_metric, metric)
                     visualizations[f"{viz_key}_rd_curves"] = rd_fig
                     
-                    # BD-Rate bar chart
+                    # BD-Rate bar chart with consistent scaling
                     if reference_codec and reference_codec in available_codecs:
                         bd_fig = visualizer.create_reference_bd_rate_chart(bd_results, reference_codec, metric)
                     else:
                         bd_fig = visualizer.create_bd_rate_bar_chart(bd_results, metric)
+                    
+                    # Apply consistent y-axis range if available
+                    if y_range is not None:
+                        bd_fig.update_layout(yaxis=dict(range=y_range, zeroline=True, zerolinecolor='black', zerolinewidth=2))
+                    
                     visualizations[f"{viz_key}_bd_rate_bars"] = bd_fig
                     
                     # Comprehensive comparison
@@ -3483,14 +3779,14 @@ class ReportGenerator:
                 }}
                 
                 // Show all metric sections
+                document.getElementById('bd-rate-vmaf').style.display = 'block';
                 document.getElementById('bd-rate-psnr').style.display = 'block';
                 document.getElementById('bd-rate-ssim').style.display = 'block';
-                document.getElementById('bd-rate-vmaf').style.display = 'block';
                 
                 // Generate BD-Rate analysis for each metric
+                generateBDRateAnalysis('vmaf', referenceCodec);
                 generateBDRateAnalysis('psnr', referenceCodec);
                 generateBDRateAnalysis('ssim', referenceCodec);
-                generateBDRateAnalysis('vmaf', referenceCodec);
             }}
             
             // Generate BD-Rate analysis for a specific metric
@@ -3764,6 +4060,12 @@ class ReportGenerator:
                     <p>BD-Rate analysis not loaded. <button onclick="initializeBDRate()">Click here to initialize</button></p>
                 </div>
                 
+                <div id="bd-rate-vmaf" class="bd-rate-metric-section" style="display: none;">
+                    <h3>VMAF Analysis</h3>
+                    <div id="bd-rate-vmaf-rd" class="bd-rate-plot"></div>
+                    <div id="bd-rate-vmaf-bd" class="bd-rate-plot"></div>
+                </div>
+                
                 <div id="bd-rate-psnr" class="bd-rate-metric-section" style="display: none;">
                     <h3>PSNR Analysis</h3>
                     <div id="bd-rate-psnr-rd" class="bd-rate-plot"></div>
@@ -3774,12 +4076,6 @@ class ReportGenerator:
                     <h3>SSIM Analysis</h3>
                     <div id="bd-rate-ssim-rd" class="bd-rate-plot"></div>
                     <div id="bd-rate-ssim-bd" class="bd-rate-plot"></div>
-                </div>
-                
-                <div id="bd-rate-vmaf" class="bd-rate-metric-section" style="display: none;">
-                    <h3>VMAF Analysis</h3>
-                    <div id="bd-rate-vmaf-rd" class="bd-rate-plot"></div>
-                    <div id="bd-rate-vmaf-bd" class="bd-rate-plot"></div>
                 </div>
             </div>
         </div>
