@@ -342,8 +342,7 @@ class BitrateDataProcessor:
     
     def prepare_bitrate_data(self, combined_df: pd.DataFrame, bitrate_col: str, bitrate_label: str, 
                            metric_calculator: MetricCalculator, 
-                           get_device_color_func, get_codec_type_func, 
-                           get_codec_line_style_func, is_custom_labeled_codec_func) -> Dict[str, Any]:
+                           get_styling_info_func) -> Dict[str, Any]:
         """Prepare data for a specific bitrate mode"""
         if bitrate_col not in combined_df.columns:
             return {'traces': [], 'bitrate_label': bitrate_label}
@@ -356,10 +355,12 @@ class BitrateDataProcessor:
             vmaf_stats = metric_calculator.calculate_metric_statistics(combined_df, 'vmaf_mean', bitrate_col)
             
             for codec, stats_data in vmaf_stats.items():
-                # Get consistent color and line style
-                color = get_device_color_func(codec) if is_custom_labeled_codec_func(codec) else get_device_color_func(codec)
-                codec_type = get_codec_type_func(codec)
-                line_style = get_codec_line_style_func(codec_type)
+                # Get consistent color and line style using the new styling function
+                # We need to determine the device for this codec - use the first available device
+                device = combined_df[combined_df['codec'] == codec]['device_serial'].iloc[0] if 'device_serial' in combined_df.columns else 'unknown'
+                styling_info = get_styling_info_func(codec, device)
+                color = styling_info['color']
+                line_style = styling_info['line_style']
                 trace_name = f"{codec} (mean)"
                 
                 # Convert bitrates to kbps for display
@@ -420,10 +421,11 @@ class BitrateDataProcessor:
             psnr_stats = metric_calculator.calculate_metric_statistics(combined_df, 'psnr', bitrate_col)
             
             for codec, stats_data in psnr_stats.items():
-                # Get consistent color and line style
-                color = get_device_color_func(codec) if is_custom_labeled_codec_func(codec) else get_device_color_func(codec)
-                codec_type = get_codec_type_func(codec)
-                line_style = get_codec_line_style_func(codec_type)
+                # Get consistent color and line style using the new styling function
+                device = combined_df[combined_df['codec'] == codec]['device_serial'].iloc[0] if 'device_serial' in combined_df.columns else 'unknown'
+                styling_info = get_styling_info_func(codec, device)
+                color = styling_info['color']
+                line_style = styling_info['line_style']
                 trace_name = f"{codec} (mean)"
                 
                 # Convert bitrates to kbps for display
@@ -484,10 +486,11 @@ class BitrateDataProcessor:
             ssim_stats = metric_calculator.calculate_metric_statistics(combined_df, 'ssim', bitrate_col)
             
             for codec, stats_data in ssim_stats.items():
-                # Get consistent color and line style
-                color = get_device_color_func(codec) if is_custom_labeled_codec_func(codec) else get_device_color_func(codec)
-                codec_type = get_codec_type_func(codec)
-                line_style = get_codec_line_style_func(codec_type)
+                # Get consistent color and line style using the new styling function
+                device = combined_df[combined_df['codec'] == codec]['device_serial'].iloc[0] if 'device_serial' in combined_df.columns else 'unknown'
+                styling_info = get_styling_info_func(codec, device)
+                color = styling_info['color']
+                line_style = styling_info['line_style']
                 trace_name = f"{codec} (mean)"
                 
                 # Convert bitrates to kbps for display
