@@ -368,8 +368,7 @@ class ReportGenerator:
         # VMAF plot - use selected bitrate column for X-axis
         if 'vmaf_mean' in combined_df.columns and bitrate_col in combined_df.columns:
             # Calculate VMAF statistics across multiple sources
-            vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', bitrate_col)
-            
+            vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', bitrate_col) 
             for codec, stats_data in vmaf_stats.items():
                 # Get consistent color and line style
                 color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
@@ -380,15 +379,14 @@ class ReportGenerator:
                 # Convert bitrates to kbps for display
                 bitrates_kbps = stats_data['bitrates'] / 1000
                 
-                # Add main line trace
+                # Add main line trace (seaborn style - clean line without markers)
                 fig.add_trace(
                     go.Scatter(
                         x=bitrates_kbps.tolist(),
                         y=stats_data['mean_values'].tolist(),
-                        mode='markers+lines',
+                        mode='lines',
                         name=trace_name,
-                        line=dict(color=color, dash=line_style, width=3),
-                        marker=dict(size=6),
+                        line=dict(color=color, width=2.5),
                         legendgroup=codec,
                         showlegend=True,
                         hovertemplate=f"<b>{codec}</b><br>" +
@@ -403,28 +401,44 @@ class ReportGenerator:
                 
                 # Add confidence interval trace only if we have meaningful confidence intervals
                 if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
-                    # Convert hex color to rgba with transparency
+                    # Convert hex color to rgba with transparency (matching seaborn style)
                     if color.startswith('#'):
                         # Convert hex to rgb
                         hex_color = color.lstrip('#')
                         r = int(hex_color[0:2], 16)
                         g = int(hex_color[2:4], 16)
                         b = int(hex_color[4:6], 16)
-                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.3)'  # Slightly more opaque like seaborn
                     else:
-                        # Fallback to gray if color format is unexpected
-                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                        # Fallback to blue like seaborn
+                        fillcolor = 'rgba(0, 123, 255, 0.3)'
+                    
+                    # Create confidence interval fill (seaborn style - properly centered)
+                    # Create two traces: upper bound and lower bound with fill between them
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['upper_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo='skip',
+                            legendgroup=codec
+                        ),
+                        row=1, col=1
+                    )
                     
                     fig.add_trace(
                         go.Scatter(
-                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
-                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['lower_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
                             fill='tonexty',
                             fillcolor=fillcolor,
-                            line=dict(color='rgba(255,255,255,0)'),
-                            legendgroup=codec,
                             showlegend=False,
-                            hoverinfo='skip'
+                            hoverinfo='skip',
+                            legendgroup=codec
                         ),
                         row=1, col=1
                     )
@@ -444,15 +458,14 @@ class ReportGenerator:
                 # Convert bitrates to kbps for display
                 bitrates_kbps = stats_data['bitrates'] / 1000
                 
-                # Add main line trace
+                # Add main line trace (seaborn style - clean line without markers)
                 fig.add_trace(
                     go.Scatter(
                         x=bitrates_kbps.tolist(),
                         y=stats_data['mean_values'].tolist(),
-                        mode='markers+lines',
+                        mode='lines',
                         name=trace_name,
-                        line=dict(color=color, dash=line_style, width=3),
-                        marker=dict(size=6),
+                        line=dict(color=color, width=2.5),
                         legendgroup=codec,
                         showlegend=False,
                         hovertemplate=f"<b>{codec}</b><br>" +
@@ -479,16 +492,32 @@ class ReportGenerator:
                         # Fallback to gray if color format is unexpected
                         fillcolor = 'rgba(128, 128, 128, 0.2)'
                     
+                    # Create confidence interval fill (seaborn style - properly centered)
+                    # Create two traces: upper bound and lower bound with fill between them
                     fig.add_trace(
                         go.Scatter(
-                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
-                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['upper_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo='skip',
+                            legendgroup=codec
+                        ),
+                        row=1, col=2
+                    )
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['lower_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
                             fill='tonexty',
                             fillcolor=fillcolor,
-                            line=dict(color='rgba(255,255,255,0)'),
-                            legendgroup=codec,
                             showlegend=False,
-                            hoverinfo='skip'
+                            hoverinfo='skip',
+                            legendgroup=codec
                         ),
                         row=1, col=2
                     )
@@ -508,15 +537,14 @@ class ReportGenerator:
                 # Convert bitrates to kbps for display
                 bitrates_kbps = stats_data['bitrates'] / 1000
                 
-                # Add main line trace
+                # Add main line trace (seaborn style - clean line without markers)
                 fig.add_trace(
                     go.Scatter(
                         x=bitrates_kbps.tolist(),
                         y=stats_data['mean_values'].tolist(),
-                        mode='markers+lines',
+                        mode='lines',
                         name=trace_name,
-                        line=dict(color=color, dash=line_style, width=3),
-                        marker=dict(size=6),
+                        line=dict(color=color, width=2.5),
                         legendgroup=codec,
                         showlegend=False,
                         hovertemplate=f"<b>{codec}</b><br>" +
@@ -531,28 +559,42 @@ class ReportGenerator:
                 
                 # Add confidence interval trace only if we have meaningful confidence intervals
                 if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
-                    # Convert hex color to rgba with transparency
+                    # Convert hex color to rgba with transparency (matching seaborn style)
                     if color.startswith('#'):
-                        # Convert hex to rgb
                         hex_color = color.lstrip('#')
                         r = int(hex_color[0:2], 16)
                         g = int(hex_color[2:4], 16)
                         b = int(hex_color[4:6], 16)
-                        fillcolor = f'rgba({r}, {g}, {b}, 0.2)'
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.3)'  # Slightly more opaque like seaborn
                     else:
-                        # Fallback to gray if color format is unexpected
-                        fillcolor = 'rgba(128, 128, 128, 0.2)'
+                        fillcolor = 'rgba(0, 123, 255, 0.3)'
+                    
+                    # Create confidence interval fill (seaborn style - properly centered)
+                    # Create two traces: upper bound and lower bound with fill between them
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['upper_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo='skip',
+                            legendgroup=codec
+                        ),
+                        row=2, col=1
+                    )
                     
                     fig.add_trace(
                         go.Scatter(
-                            x=bitrates_kbps.tolist() + bitrates_kbps[::-1].tolist(),
-                            y=stats_data['upper_bound'].tolist() + stats_data['lower_bound'][::-1].tolist(),
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['lower_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
                             fill='tonexty',
                             fillcolor=fillcolor,
-                            line=dict(color='rgba(255,255,255,0)'),
-                            legendgroup=codec,
                             showlegend=False,
-                            hoverinfo='skip'
+                            hoverinfo='skip',
+                            legendgroup=codec
                         ),
                         row=2, col=1
                     )
@@ -586,36 +628,82 @@ class ReportGenerator:
                         row=3, col=1
                     )
         
-        # Bitrate Accuracy plot (as line graph)
+        # Bitrate Accuracy plot (with averaging and confidence intervals)
         if 'bitrate_bps' in combined_df.columns and 'calculated_bitrate_bps' in combined_df.columns:
-            for codec in combined_df['codec'].unique():
-                codec_data = combined_df[combined_df['codec'] == codec]
-                for device in codec_data['device_serial'].unique():
-                    device_data = codec_data[codec_data['device_serial'] == device].sort_values('bitrate_bps')
-                    model = device_data['model'].iloc[0] if 'model' in device_data.columns else device
+            # Calculate bitrate accuracy for all data
+            combined_df['bitrate_accuracy'] = ((combined_df['calculated_bitrate_bps'] - combined_df['bitrate_bps']) / combined_df['bitrate_bps'] * 100)
+            
+            # Calculate bitrate accuracy statistics across multiple sources
+            accuracy_stats = self._calculate_metric_statistics(combined_df, 'bitrate_accuracy', 'bitrate_bps')
+            
+            for codec, stats_data in accuracy_stats.items():
+                # Get consistent color and line style
+                color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(codec)
+                codec_type = self._get_codec_type(codec)
+                line_style = self._get_codec_line_style(codec_type)
+                trace_name = f"{codec} (mean)"
+                
+                # Convert bitrates to kbps for display
+                bitrates_kbps = stats_data['bitrates'] / 1000
+                
+                # Add main line trace (seaborn style - clean line without markers)
+                fig.add_trace(
+                    go.Scatter(
+                        x=bitrates_kbps.tolist(),
+                        y=stats_data['mean_values'].tolist(),
+                        mode='lines',
+                        name=trace_name,
+                        line=dict(color=color, width=2.5),
+                        legendgroup=codec,
+                        showlegend=False,
+                        hovertemplate=f"<b>{codec}</b><br>" +
+                                     f"Bitrate: %{{x:.1f}} kbps<br>" +
+                                     f"Accuracy: %{{y:.2f}}%<br>" +
+                                     f"Samples: {stats_data['count'][0] if len(stats_data['count']) > 0 else 'N/A'}<br>" +
+                                     f"Sources: {len(stats_data['sources'])}<br>" +
+                                     "<extra></extra>"
+                    ),
+                    row=3, col=2
+                )
+                
+                # Add confidence interval trace only if we have meaningful confidence intervals
+                if not np.allclose(stats_data['upper_bound'], stats_data['lower_bound']):
+                    # Convert hex color to rgba with transparency (matching seaborn style)
+                    if color.startswith('#'):
+                        hex_color = color.lstrip('#')
+                        r = int(hex_color[0:2], 16)
+                        g = int(hex_color[2:4], 16)
+                        b = int(hex_color[4:6], 16)
+                        fillcolor = f'rgba({r}, {g}, {b}, 0.3)'  # Slightly more opaque like seaborn
+                    else:
+                        fillcolor = 'rgba(0, 123, 255, 0.3)'
                     
-                    # Get consistent color and line style
-                    # Use codec name for color when using custom labels, device name otherwise
-                    color = self._get_device_color(codec) if self._is_custom_labeled_codec(codec) else self._get_device_color(model)
-                    codec_type = self._get_codec_type(codec)
-                    line_style = self._get_codec_line_style(codec_type)
-                    trace_name = self._get_trace_name(codec, model)
-                    
-                    # Calculate accuracy percentage
-                    target = device_data['bitrate_bps']
-                    actual = device_data['calculated_bitrate_bps']
-                    accuracy = ((actual - target) / target * 100).tolist()
+                    # Create confidence interval fill (seaborn style - properly centered)
+                    # Create two traces: upper bound and lower bound with fill between them
+                    fig.add_trace(
+                        go.Scatter(
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['upper_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo='skip',
+                            legendgroup=codec
+                        ),
+                        row=3, col=2
+                    )
                     
                     fig.add_trace(
                         go.Scatter(
-                            x=(target / 1000).tolist(),  # Target bitrate
-                            y=accuracy,
-                            mode='markers+lines',
-                            name=trace_name,
-                            line=dict(color=color, dash=line_style, width=2),
-                            marker=dict(size=6),
-                            legendgroup=trace_name,
-                            showlegend=False
+                            x=bitrates_kbps.tolist(),
+                            y=stats_data['lower_bound'].tolist(),
+                            mode='lines',
+                            line=dict(width=0),
+                            fill='tonexty',
+                            fillcolor=fillcolor,
+                            showlegend=False,
+                            hoverinfo='skip',
+                            legendgroup=codec
                         ),
                         row=3, col=2
                     )
@@ -765,10 +853,11 @@ class ReportGenerator:
         Calculate any metric (e.g. vmaf_mean, psnr, ssim) over multiple sources with confidence intervals.
         
         This function is designed to prepare data for smoother Quality Metric graphs by aggregating
-        metrics across multiple sources (devices) and providing confidence intervals.
+        metrics across multiple sources (devices) and reference files, providing confidence intervals.
+        It properly averages over runs with different target bitrates and different reference files.
         
         Args:
-            combined_df: DataFrame containing all test results
+            combined_df: DataFrame containing all test results (must include 'reference_file' column)
             metric_column: Column name for the metric to calculate (e.g., 'vmaf_mean', 'psnr', 'ssim')
             bitrate_column: Column name for bitrate (e.g., 'calculated_bitrate_bps', 'bitrate_bps')
             
@@ -777,16 +866,30 @@ class ReportGenerator:
             {
                 'codec_name': {
                     'bitrates': array of bitrate values,
-                    'mean_values': array of mean metric values,
+                    'mean_values': array of mean metric values (averaged across reference files),
                     'upper_bound': array of upper confidence bound values,
                     'lower_bound': array of lower confidence bound values,
                     'count': array of sample counts,
-                    'sources': list of source identifiers
+                    'sources': list of source identifiers (devices and reference files)
                 }
             }
             
+        Note:
+            The function now properly handles different reference files by averaging metrics
+            across all reference files and devices at each bitrate point. This ensures that
+            interpolation results are more accurate when comparing across different test runs.
+            
+            Bitrate binning: Similar bitrates (within 5% tolerance) are grouped together
+            and averaged, which is especially useful when testing the same target bitrates
+            with different reference files that may achieve slightly different actual bitrates.
+            
+            Confidence intervals are calculated as follows:
+            - 1 data point: No confidence interval (upper = lower = mean)
+            - 2+ data points: Statistical confidence intervals using t-distribution (small samples) or normal distribution (large samples)
+            - All confidence intervals are properly centered around the mean and represent statistical uncertainty
+            
         Example:
-            # Calculate VMAF statistics across multiple sources
+            # Calculate VMAF statistics across multiple sources and reference files
             vmaf_stats = self._calculate_metric_statistics(combined_df, 'vmaf_mean', 'calculated_bitrate_bps')
             
             # Calculate PSNR statistics using target bitrate
@@ -796,7 +899,7 @@ class ReportGenerator:
             if 'h264' in vmaf_stats:
                 codec_data = vmaf_stats['h264']
                 bitrates = codec_data['bitrates']
-                mean_vmaf = codec_data['mean_values']
+                mean_vmaf = codec_data['mean_values']  # Averaged across reference files
                 confidence_upper = codec_data['upper_bound']
                 confidence_lower = codec_data['lower_bound']
         """
@@ -824,6 +927,10 @@ class ReportGenerator:
             self.logger.warning(f"No valid data found for metric '{metric_column}'")
             return results
         
+        # Check if reference_file column exists, if not create a dummy one
+        if 'reference_file' not in valid_data.columns:
+            valid_data['reference_file'] = 'unknown'
+        
         # Group by codec and calculate statistics
         for codec in valid_data['codec'].unique():
             codec_data = valid_data[valid_data['codec'] == codec]
@@ -831,14 +938,37 @@ class ReportGenerator:
             # Sort by bitrate for consistent ordering
             codec_data = codec_data.sort_values(bitrate_column)
             
-            # Get unique bitrate values
+            # Get unique bitrate values and group similar bitrates together
+            # Use binning to group similar bitrates (within 5% tolerance)
+            all_bitrates = codec_data[bitrate_column].values
             unique_bitrates = sorted(codec_data[bitrate_column].unique())
             
             if len(unique_bitrates) < 2:
                 self.logger.warning(f"Not enough bitrate points for codec '{codec}' (need at least 2)")
                 continue
             
-            # Calculate statistics for each bitrate point
+            # Group similar bitrates together using 5% tolerance
+            bitrate_groups = []
+            used_bitrates = set()
+            
+            for bitrate in unique_bitrates:
+                if bitrate in used_bitrates:
+                    continue
+                
+                # Find all bitrates within 5% of this one
+                tolerance = 0.05  # 5% tolerance
+                similar_bitrates = []
+                for other_bitrate in unique_bitrates:
+                    if other_bitrate not in used_bitrates:
+                        if abs(other_bitrate - bitrate) / bitrate <= tolerance:
+                            similar_bitrates.append(other_bitrate)
+                            used_bitrates.add(other_bitrate)
+                
+                # Use the mean of similar bitrates as the representative bitrate
+                representative_bitrate = np.mean(similar_bitrates)
+                bitrate_groups.append((representative_bitrate, similar_bitrates))
+            
+            # Calculate statistics for each bitrate group, averaging across different reference files
             bitrate_values = []
             mean_values = []
             upper_bounds = []
@@ -846,22 +976,23 @@ class ReportGenerator:
             counts = []
             sources = []
             
-            for bitrate in unique_bitrates:
-                # Get all data points at this bitrate
-                bitrate_data = codec_data[codec_data[bitrate_column] == bitrate]
+            for representative_bitrate, similar_bitrates in bitrate_groups:
+                # Get all data points at these similar bitrates (across all reference files and devices)
+                bitrate_mask = codec_data[bitrate_column].isin(similar_bitrates)
+                bitrate_data = codec_data[bitrate_mask]
                 
                 if bitrate_data.empty:
                     continue
                 
-                # Calculate statistics across all sources (devices) at this bitrate
+                # Calculate statistics across all sources (devices) and reference files at this bitrate
                 metric_values = bitrate_data[metric_column].values
                 mean_val = np.mean(metric_values)
                 count = len(metric_values)
                 
-                # Only calculate confidence intervals if we have enough data points
-                # For single video with few bitrates, just use the mean values
-                if count < 3:  # Need at least 3 data points for meaningful confidence intervals
-                    # No confidence interval - just use the mean value
+                # Calculate confidence intervals
+                # With 2 or more data points, we can show some indication of variability
+                if count < 2:
+                    # No confidence interval for single data point
                     upper_bound = mean_val
                     lower_bound = mean_val
                 else:
@@ -872,39 +1003,65 @@ class ReportGenerator:
                     if std_val == 0:
                         std_val = mean_val * 0.01  # Use 1% of mean as small std
                     
-                    # Calculate confidence interval
-                    # Use t-distribution for small samples, normal for large samples
-                    if count < 30:
-                        # Use t-distribution for small samples
-                        t_value = stats.t.ppf(0.975, count - 1)  # 95% CI
-                        confidence_factor = t_value
+                    # Calculate confidence interval using seaborn's bootstrap approach
+                    # For small samples, use a simplified bootstrap-like method
+                    if count >= 3:
+                        # Use bootstrap-style confidence interval
+                        # Resample the data multiple times and calculate mean
+                        n_bootstrap = min(1000, count * 100)  # Bootstrap samples
+                        bootstrap_means = []
+                        for _ in range(n_bootstrap):
+                            # Sample with replacement
+                            bootstrap_sample = np.random.choice(metric_values, size=count, replace=True)
+                            bootstrap_means.append(np.mean(bootstrap_sample))
+                        
+                        # Calculate 95% confidence interval from bootstrap distribution
+                        lower_bound = np.percentile(bootstrap_means, 2.5)
+                        upper_bound = np.percentile(bootstrap_means, 97.5)
                     else:
-                        # Use normal distribution for large samples
-                        confidence_factor = 1.96  # 95% CI
+                        # For very small samples (2 data points), use a conservative approach
+                        # Use the range of the data as a rough confidence interval
+                        data_range = np.max(metric_values) - np.min(metric_values)
+                        half_range = data_range * 0.25  # Conservative 25% of range
+                        upper_bound = mean_val + half_range
+                        lower_bound = mean_val - half_range
                     
-                    upper_bound = mean_val + confidence_factor * (std_val / np.sqrt(count))
-                    lower_bound = mean_val - confidence_factor * (std_val / np.sqrt(count))
-                    
-                    # Ensure bounds are reasonable for the metric
+                    # Ensure bounds are reasonable for the metric while maintaining symmetry
                     if metric_column in ['psnr', 'ssim', 'vmaf_mean']:
                         if metric_column == 'vmaf_mean':
-                            lower_bound = max(0, lower_bound)
-                            upper_bound = min(100, upper_bound)
+                            # Keep confidence interval symmetric around mean
+                            half_range = min(mean_val - 0, 100 - mean_val)  # Distance to nearest boundary
+                            actual_half_range = min(mean_val - lower_bound, upper_bound - mean_val)  # Actual CI half-range
+                            symmetric_range = min(half_range, actual_half_range)  # Don't exceed boundaries
+                            upper_bound = mean_val + symmetric_range
+                            lower_bound = mean_val - symmetric_range
                         elif metric_column == 'psnr':
-                            lower_bound = max(0, lower_bound)  # PSNR should be positive
+                            # Keep confidence interval symmetric around mean
+                            half_range = min(mean_val - 0, 100 - mean_val)  # Distance to nearest boundary (assuming max PSNR ~100)
+                            actual_half_range = min(mean_val - lower_bound, upper_bound - mean_val)
+                            symmetric_range = min(half_range, actual_half_range)
+                            upper_bound = mean_val + symmetric_range
+                            lower_bound = mean_val - symmetric_range
                         elif metric_column == 'ssim':
-                            lower_bound = max(0, lower_bound)
-                            upper_bound = min(1, upper_bound)
+                            # Keep confidence interval symmetric around mean
+                            half_range = min(mean_val - 0, 1 - mean_val)  # Distance to nearest boundary
+                            actual_half_range = min(mean_val - lower_bound, upper_bound - mean_val)
+                            symmetric_range = min(half_range, actual_half_range)
+                            upper_bound = mean_val + symmetric_range
+                            lower_bound = mean_val - symmetric_range
                 
-                bitrate_values.append(bitrate)
+                
+                bitrate_values.append(representative_bitrate)
                 mean_values.append(mean_val)
                 upper_bounds.append(upper_bound)
                 lower_bounds.append(lower_bound)
                 counts.append(count)
                 
-                # Collect source identifiers
+                # Collect source identifiers (devices and reference files)
                 source_ids = bitrate_data['device_serial'].unique().tolist()
+                reference_files = bitrate_data['reference_file'].unique().tolist()
                 sources.extend(source_ids)
+                sources.extend(reference_files)  # Also include reference files as sources
             
             if len(bitrate_values) > 0:
                 results[codec] = {
@@ -913,7 +1070,7 @@ class ReportGenerator:
                     'upper_bound': np.array(upper_bounds),
                     'lower_bound': np.array(lower_bounds),
                     'count': np.array(counts),
-                    'sources': list(set(sources))  # Unique sources
+                    'sources': list(set(sources))  # Unique sources (devices and reference files)
                 }
         
         return results
@@ -3971,6 +4128,13 @@ class ReportGenerator:
             custom_label = "_".join(result.test_name.split("_")[2:])  # Everything after "quality_analysis_"
             if 'codec' in df.columns:
                 df['codec'] = custom_label
+        
+        # Add reference file information from test_data
+        if result.test_data and 'sourcefile' in result.test_data:
+            df['reference_file'] = result.test_data['sourcefile']
+        else:
+            df['reference_file'] = 'unknown'
+            
         return df
 
     def _get_available_codecs_from_results(self, test_results: List[TestResult]) -> List[str]:

@@ -76,29 +76,50 @@ class AVABDRateAnalyzer:
             self.logger.error("Could not find bitrate column")
             return {}
         
-        # Group by codec and extract RD curves
+        # Group by codec and reference_file to extract RD curves
+        # This ensures interpolation only happens within runs with the same reference file
         rd_curves = {}
         
         if 'codec' not in df.columns:
             self.logger.error("No 'codec' column found in CSV")
             return {}
         
+        # Check if reference_file column exists, if not create a dummy one
+        if 'reference_file' not in df.columns:
+            df['reference_file'] = 'unknown'
+            self.logger.warning("No 'reference_file' column found, using 'unknown' for all data")
+        
+        # Group by both codec and reference_file to ensure interpolation stays within same reference
         for codec in df['codec'].unique():
             codec_data = df[df['codec'] == codec].copy()
             
-            # Filter valid data points
-            valid_data = codec_data.dropna(subset=[bitrate_col, quality_col])
-            valid_data = valid_data[valid_data[quality_col] > 0]
-            
-            if len(valid_data) < 2:
-                self.logger.warning(f"Insufficient data points for codec {codec}")
-                continue
-            
-            # Sort by quality for proper RD curve
-            valid_data = valid_data.sort_values(quality_col)
-            
-            rd_curves[codec] = valid_data[[bitrate_col, quality_col, 'codec']].copy()
-            rd_curves[codec].columns = ['bitrate', 'quality', 'codec']
+            for ref_file in codec_data['reference_file'].unique():
+                # Filter data for this specific codec and reference file combination
+                ref_data = codec_data[codec_data['reference_file'] == ref_file].copy()
+                
+                # Filter valid data points
+                valid_data = ref_data.dropna(subset=[bitrate_col, quality_col])
+                valid_data = valid_data[valid_data[quality_col] > 0]
+                
+                if len(valid_data) < 2:
+                    self.logger.warning(f"Insufficient data points for codec {codec} with reference {ref_file}")
+                    continue
+                
+                # Sort by quality for proper RD curve
+                valid_data = valid_data.sort_values(quality_col)
+                
+                # Create a unique key for this codec-reference combination
+                # For backward compatibility, if there's only one reference file per codec, use just the codec name
+                # Otherwise, include the reference file in the key
+                if len(codec_data['reference_file'].unique()) == 1:
+                    curve_key = codec
+                else:
+                    # Create a safe key that includes reference file info
+                    ref_safe = ref_file.replace('/', '_').replace('\\', '_').replace('.', '_')[:20]  # Limit length
+                    curve_key = f"{codec}_{ref_safe}"
+                
+                rd_curves[curve_key] = valid_data[[bitrate_col, quality_col, 'codec', 'reference_file']].copy()
+                rd_curves[curve_key].columns = ['bitrate', 'quality', 'codec', 'reference_file']
         
         return rd_curves
     
